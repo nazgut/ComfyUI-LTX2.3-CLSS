@@ -60,7 +60,7 @@
       "upscale_method": "lanczos",
       "scale_by": 0.5,
       "image": [
-        "7",
+        "79",
         0
       ]
     },
@@ -83,7 +83,7 @@
   },
   "10": {
     "inputs": {
-      "value": 242
+      "value": 97
     },
     "class_type": "PrimitiveInt",
     "_meta": {
@@ -384,7 +384,7 @@
   "34": {
     "inputs": {
       "av_latent": [
-        "77",
+        "98",
         0
       ]
     },
@@ -455,6 +455,7 @@
       "filename_prefix": "video/ComfyUI",
       "format": "mp4",
       "codec": "auto",
+      "video-preview": "",
       "video": [
         "36",
         0
@@ -480,7 +481,7 @@
     "inputs": {
       "num_chunks": 3,
       "guider": [
-        "18",
+        "99",
         0
       ],
       "sampler": [
@@ -500,7 +501,15 @@
         0
       ],
       "clss_config": [
-        "76",
+        "96",
+        0
+      ],
+      "image": [
+        "8",
+        0
+      ],
+      "vae": [
+        "2",
         0
       ]
     },
@@ -511,7 +520,7 @@
   },
   "58": {
     "inputs": {
-      "prompts": "POV, Playful animated cinematic close-up, moving with a bouncy, handheld float, following a cheerful chubby hamster driver in tiny goggles and a polka-dot scarf, zooming through a colorful candy-town at sunrise in a round jellybean-shaped car that puffs glittery exhaust. The hamster grips an oversized steering wheel with both paws, bouncing along a winding gumdrop street glowing with warm, syrupy morning light. The camera weaves playfully around the car, dipping low and zooming in like a curious bumblebee.\nRich, exaggerated cartoon audio: Putt-putt-vroom! (wobbly engine), Boing-boing-squeak! (bouncy suspension), and the cheerful Ding-a-ling-doodle! of a passing bicycle bell.\n---\nPOV, Playful animated cinematic close-up, moving with a bouncy, handheld float, following the same cheerful hamster driver in goggles and polka-dot scarf, now puttering through a bustling toy-town market square full of waving marshmallow vendors and bobbing balloon stalls. Morning light streams between wobbly buildings, casting rainbow reflections on the shiny road. The camera bounces around the jellybean car as it weaves between giant rolling fruit carts.\nRich, exaggerated cartoon audio: Beep-beep-honka! (squeaky horn), Wibble-wobble-splat! (a dropped jelly), and the muffled Toot-whistle! of a candy train chugging by.\n---\nPOV, Playful animated cinematic close-up, moving with a bouncy, handheld float, following the same cheerful hamster driver, now zipping along a curly rainbow bridge high above the candy-town with fluffy cloud-cotton drifting past. The little car's headlights blink like googly eyes as it bounces over the arching bridge. Warm sunrise glow pulses across the shiny shell of the jellybean car. The camera swoops alongside, dipping under the bridge railings like a darting bee.\nRich, exaggerated cartoon audio: Boing-twang-zoom! (springy bridge), Wheee-flutter! (wind), and a distant cheerful Cuckoo-doodle! from a flying clock-bird.",
+      "prompts": "3D, POV driving a sleek Lotus-style sports car along the sunny Malibu coastline, golden sunlight reflecting off the ocean, palm trees passing by, smooth winding roads, vibrant summer colors, cinematic motion, ultra-realistic detailing, high-end luxury car aesthetic, 8K resolution.",
       "max_length": 512,
       "clip": [
         "47",
@@ -523,7 +532,16 @@
       "title": "CLSS Scene Prompts"
     }
   },
-  "76": {
+  "79": {
+    "inputs": {
+      "image": "image.jpeg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "96": {
     "inputs": {
       "tau_c": 0.05,
       "beta": 0.4,
@@ -538,7 +556,22 @@
       "title": "CLSS Config"
     }
   },
-  "77": {
+  "97": {
+    "inputs": {
+      "tau_c": 0.05,
+      "beta": 0.4,
+      "ema_lambda": 0.1,
+      "overlap": 8,
+      "anchor_force_every": 5,
+      "sigma_max_drift": 0.05,
+      "adain_max_amplification": 1.2
+    },
+    "class_type": "CLSSConfig",
+    "_meta": {
+      "title": "CLSS Config"
+    }
+  },
+  "98": {
     "inputs": {
       "frames_per_chunk": 21,
       "guider": [
@@ -562,7 +595,15 @@
         0
       ],
       "clss_config": [
-        "78",
+        "97",
+        0
+      ],
+      "image": [
+        "79",
+        0
+      ],
+      "vae": [
+        "2",
         0
       ]
     },
@@ -571,19 +612,17 @@
       "title": "CLSS Stage 2"
     }
   },
-  "78": {
+  "99": {
     "inputs": {
-      "tau_c": 0.05,
-      "beta": 0.4,
-      "ema_lambda": 0.1,
-      "overlap": 8,
-      "anchor_force_every": 5,
-      "sigma_max_drift": 0.05,
-      "adain_max_amplification": 1.2
+      "audio_cfg": 7,
+      "guider": [
+        "18",
+        0
+      ]
     },
-    "class_type": "CLSSConfig",
+    "class_type": "CLSSAVGuider",
     "_meta": {
-      "title": "CLSS Config"
+      "title": "CLSS AV Guider (Split CFG)"
     }
   }
 }
