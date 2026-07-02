@@ -35,6 +35,7 @@ import comfy.model_management
 import comfy.model_patcher
 import comfy.nested_tensor
 import comfy.sampler_helpers
+import comfy.samplers
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
 from comfy_extras.nodes_lt import LTXVAddGuide
 from comfy_extras.nodes_textgen import LTX2_T2V_SYSTEM_PROMPT
@@ -1377,12 +1378,166 @@ class CLSSAVGuider:
 # Registry
 # ---------------------------------------------------------------------------
 
+class _GuiderCLSSAV(comfy.samplers.CFGGuider):
+    """CFGGuider subclass implementing the reference MultiModalGuider for joint AV.
+
+    Per denoising step (reference denoisers.py::_guided_denoise + guiders.py):
+      1. cond + uncond passes (standard, batched by calc_cond_batch)
+      2. "mod" pass: positive context with BOTH cross-modal attentions skipped —
+         ComfyUI's BasicAVTransformerBlock natively honours
+         transformer_options["a2v_cross_attn"/"v2a_cross_attn"] (av_model.py:267-268),
+         which is exactly the reference's SKIP_A2V_CROSS_ATTN + SKIP_V2A_CROSS_ATTN
+         perturbation.
+      3. Per-modality combine:
+           pred = cond + (cfg−1)·(cond−uncond) + (modality−1)·(cond−mod)
+      4. Per-modality CFG rescale: pred *= r·(cond.std/pred.std) + (1−r)
+
+    The modality term is the audio-critical piece: it amplifies the component of
+    the audio prediction that COMES FROM THE VIDEO (and vice versa).  Without it,
+    audio↔video coupling relies solely on joint attention, which in the 4-bit
+    model degrades to generic text-conditioned ambience (drone).  The working
+    standalone generate_clss.py runs with modality_scale=3.0 by default.
+
+    Note: STG (skip self-attn in block 28) is NOT implemented — ComfyUI's
+    av_model.py has no per-block self-attn skip plumbing; adding it would require
+    patching attention internals.  Modality guidance alone is the documented
+    audio-quality lever.
+
+    Cost: +1 transformer pass per step when modality_scale != 1 (~+50%% step time).
+    """
+
+    _video_cfg      = 4.0
+    _audio_cfg      = 7.0
+    _modality_scale = 3.0
+    _rescale        = 0.7
+    _logged         = False
+
+    def set_av_params(self, video_cfg, audio_cfg, modality_scale, rescale):
+        self._video_cfg      = video_cfg
+        self._audio_cfg      = audio_cfg
+        self._modality_scale = modality_scale
+        self._rescale        = rescale
+        self._logged         = False
+        self.set_cfg(video_cfg)          # used by fallback path + downstream logging
+        self.audio_cfg = audio_cfg       # readable by CLSSStreamingSampler logging
+
+    @staticmethod
+    def _rescale_pred(pred: torch.Tensor, cond: torch.Tensor, r: float) -> torch.Tensor:
+        if r <= 0.0:
+            return pred
+        factor = cond.float().std() / pred.float().std().clamp(min=1e-8)
+        factor = r * factor + (1.0 - r)
+        return pred * factor.to(pred.dtype)
+
+    def predict_noise(self, x, timestep, model_options={}, seed=None):
+        positive = self.conds.get("positive", None)
+        negative = self.conds.get("negative", None)
+
+        # Non-AV latents or missing negative → standard CFG path.
+        if not isinstance(x, comfy.nested_tensor.NestedTensor) or negative is None:
+            return super().predict_noise(x, timestep, model_options, seed)
+
+        out_cond, out_uncond = comfy.samplers.calc_cond_batch(
+            self.inner_model, [positive, negative], x, timestep, model_options
+        )
+
+        out_mod = None
+        if self._modality_scale != 1.0 and self._modality_scale != 0.0:
+            mo = model_options.copy()
+            to = dict(mo.get("transformer_options", {}))
+            to["a2v_cross_attn"] = False   # audio→video cross-attn OFF
+            to["v2a_cross_attn"] = False   # video→audio cross-attn OFF
+            mo["transformer_options"] = to
+            (out_mod,) = comfy.samplers.calc_cond_batch(
+                self.inner_model, [positive], x, timestep, mo
+            )
+
+        vid_c, aud_c = out_cond.unbind()
+        vid_u, aud_u = out_uncond.unbind()
+
+        pred_v = vid_c + (self._video_cfg - 1.0) * (vid_c - vid_u)
+        pred_a = aud_c + (self._audio_cfg - 1.0) * (aud_c - aud_u)
+
+        if out_mod is not None:
+            vid_m, aud_m = out_mod.unbind()
+            pred_v = pred_v + (self._modality_scale - 1.0) * (vid_c - vid_m)
+            pred_a = pred_a + (self._modality_scale - 1.0) * (aud_c - aud_m)
+            if not self._logged:
+                with torch.no_grad():
+                    vm = (vid_c - vid_m).float().norm().item()
+                    am = (aud_c - aud_m).float().norm().item()
+                print(f"[CLSS AVGuiderV2] step-1 mod_diff_norm: vid={vm:.4f}  aud={am:.4f}  "
+                      f"(0 would mean cross-attn skip is inert)")
+
+        pred_v = self._rescale_pred(pred_v, vid_c, self._rescale)
+        pred_a = self._rescale_pred(pred_a, aud_c, self._rescale)
+
+        if not self._logged:
+            self._logged = True
+            print(f"[CLSS AVGuiderV2] active: video_cfg={self._video_cfg:.1f}  "
+                  f"audio_cfg={self._audio_cfg:.1f}  modality={self._modality_scale:.1f}  "
+                  f"rescale={self._rescale:.2f}  passes/step={2 if out_mod is None else 3}")
+
+        return comfy.nested_tensor.NestedTensor((pred_v, pred_a))
+
+
+class CLSSAVGuiderV2:
+    """Reference-parity AV guider: split CFG + modality guidance + rescale.
+
+    Replaces the CFGGuider → CLSSAVGuider chain.  Connect model + positive +
+    negative directly (positive from LTXVConditioning, exactly as you would
+    wire a CFGGuider).  Use for Stage 1 only; Stage 2 (distilled LoRA, cfg=1)
+    keeps its plain CFGGuider.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model":    ("MODEL",        {}),
+                "positive": ("CONDITIONING", {}),
+                "negative": ("CONDITIONING", {}),
+                "video_cfg": ("FLOAT", {"default": 4.0, "min": 1.0, "max": 30.0, "step": 0.5}),
+                "audio_cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 30.0, "step": 0.5}),
+                "modality_scale": ("FLOAT", {
+                    "default": 3.0, "min": 0.0, "max": 10.0, "step": 0.5,
+                    "tooltip": (
+                        "Cross-modal guidance (reference default 3.0).  Runs one extra\n"
+                        "transformer pass per step with audio↔video cross-attention\n"
+                        "disabled, then amplifies (cond − mod): the part of each\n"
+                        "modality's prediction that comes from the OTHER modality.\n"
+                        "This is the audio-quality lever — without it, 4-bit audio\n"
+                        "decouples from the video and drifts to generic drone.\n"
+                        "1.0 = off (no extra pass, no effect)."
+                    ),
+                }),
+                "rescale": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05,
+                                      "tooltip": "Per-modality CFG rescale (reference 0.7)."}),
+            },
+        }
+
+    RETURN_TYPES = ("GUIDER",)
+    RETURN_NAMES = ("guider",)
+    FUNCTION = "get_guider"
+    CATEGORY = "LTX-CLSS"
+
+    def get_guider(self, model, positive, negative, video_cfg, audio_cfg,
+                   modality_scale, rescale):
+        guider = _GuiderCLSSAV(model)
+        guider.set_conds(positive, negative)
+        guider.set_av_params(video_cfg, audio_cfg, modality_scale, rescale)
+        print(f"[CLSS] AVGuiderV2 built: video_cfg={video_cfg:.2f}  audio_cfg={audio_cfg:.2f}  "
+              f"modality={modality_scale:.2f}  rescale={rescale:.2f}")
+        return (guider,)
+
+
 NODE_CLASS_MAPPINGS = {
     "CLSSConfig":           CLSSConfigNode,
     "CLSSScenePrompts":     CLSSScenePrompts,
     "CLSSStreamingSampler": CLSSStreamingSampler,
     "CLSSStage2":           CLSSStage2,
     "CLSSAVGuider":         CLSSAVGuider,
+    "CLSSAVGuiderV2":       CLSSAVGuiderV2,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1391,4 +1546,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CLSSStreamingSampler": "CLSS Streaming Sampler",
     "CLSSStage2":           "CLSS Stage 2",
     "CLSSAVGuider":         "CLSS AV Guider (Split CFG)",
+    "CLSSAVGuiderV2":       "CLSS AV Guider V2 (Split CFG + Modality)",
 }
