@@ -389,7 +389,14 @@ class CLSSStreamingSampler:
         # Without this, each chunk starts from pure noise → incoherent audio, broken dialog.
         if aud_tmpl is not None:
             B_a, C_a, new_af, freq = aud_tmpl.shape
-            audio_overlap_af = round(overlap_lf * new_af / new_lf) if new_lf > 0 else 0
+            # Pixel-time-based mapping (matches reference pipeline.py):
+            # latent frames → pixel frames via the causal VAE formula (lf−1)·8+1,
+            # then scale audio frames by the pixel-time ratio.  The old tensor-ratio
+            # formula round(overlap_lf·new_af/new_lf) overestimated the overlap span
+            # (63 vs 60 for 8/13/102), freezing audio into time owned by new video.
+            _overlap_px = (overlap_lf - 1) * 8 + 1
+            _new_px     = (new_lf - 1) * 8 + 1
+            audio_overlap_af = round(_overlap_px / _new_px * new_af) if new_lf > 0 else 0
         else:
             B_a = C_a = new_af = freq = audio_overlap_af = 0
 
@@ -443,9 +450,16 @@ class CLSSStreamingSampler:
         # Tracking state for per-chunk coherence metrics (§items 1,2,6)
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
         _s1_aud_prev_last:   torch.Tensor | None = None  # [B, C_a, 1, freq] last audio frame
-        _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean
-        _s1_audio_ref_std:   torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) std
+        _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean (diagnostics)
+        _s1_audio_ref_std:   torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) std (diagnostics)
+        _s1_audio_rms_ref:   float | None = None         # chunk-0 scalar RMS (onset-excluded) — correction target
         _s1_audio_freq_ref:  list[float]  | None = None  # chunk-0 per-bin energy reference
+        # Rolling audio tail (reference pipeline.py:771-806): last 2×overlap frames of
+        # accumulated output, kept across chunks.  Lets ref_audio be a FULL overlap-length
+        # window ending immediately before the next overlap, even when that window spans
+        # a chunk boundary (with new_af=102, ov=60 the within-chunk pre-overlap region is
+        # only 42f — the tail restores the missing frames from the previous chunk).
+        _s1_audio_tail:      torch.Tensor | None = None
         # Note: identity_sim is computed vs nearest bank anchor (not fixed chunk-1) so it tracks
         # within-scene identity; with a single-anchor bank it equals vs-chunk-1 and is flagged.
 
@@ -774,44 +788,49 @@ class CLSSStreamingSampler:
                         f"[CLSS S1]   audio freq_energy=[{' '.join(f'{e:.3f}' for e in _freq_e)}]"
                         f"  ratio=[{' '.join(f'{r:.2f}' for r in _freq_ratio)}]"
                     )
-                # Per-(channel × freq-bin) spectral gain correction.
-                # Scales each latent bin back toward its chunk-0 reference std without
-                # shifting the mean (DC shift corrupts the next chunk's SLB context).
-                # β=0.3 and hard cap at 1.15 keep the correction conservative;
-                # at cfg=7 audio the drift should shrink and β can be lowered further.
-                # Chunk-0 reference std excludes the first 16 onset frames (fade-in).
+                # Scalar upward-only RMS gain — exact port of the reference pipeline
+                # (pipeline.py:741-757).  One global gain per chunk, applied ONLY when
+                # the chunk is quieter than chunk-0 ("don't attenuate genuinely louder
+                # chunks"), blended with β=0.3 and capped at 1.15.
+                #
+                # The previous per-(ch×bin) std gain with clamp(min=1.0) was a
+                # boost-only ratchet: it pumped energy into bins whose temporal std
+                # decayed even when their |x| energy already sat 1.4-1.7× ABOVE the
+                # chunk-0 reference (the high-freq overshoot at audio_cfg=7).  A per-bin
+                # correction that can only add energy amplifies exactly the bins the
+                # rescaled guidance should be taming.  Per-bin std ratios and DC drift
+                # are kept below as log-only diagnostics.
                 with torch.no_grad():
                     _cur_mean = new_aud.float().mean(dim=2, keepdim=True)  # [B, C_a, 1, freq]
                     _cur_std  = new_aud.float().std(dim=2, keepdim=True).clamp(min=1e-6)
-                if _s1_audio_ref_mean is None:
+                if _s1_audio_rms_ref is None:
                     _skip = min(16, new_aud.shape[2])
                     _ref_aud = new_aud[:, :, _skip:] if new_aud.shape[2] > _skip else new_aud
+                    _s1_audio_rms_ref  = _ref_aud.float().pow(2).mean().sqrt().item()
                     _s1_audio_ref_mean = _cur_mean.cpu()   # DC reference for drift logging
                     _s1_audio_ref_std  = _ref_aud.float().std(dim=2, keepdim=True).clamp(min=1e-6).cpu()
+                    print(f"[CLSS S1]   audio rms_ref={_s1_audio_rms_ref:.4f} (onset-excluded)")
                 else:
                     _beta = 0.3
-                    _ref_m = _s1_audio_ref_mean.to(device)
-                    _ref_s = _s1_audio_ref_std.to(device)
-                    # Raw gain = tgt_std / cur_std = (1-β) + β*(ref_s/cur_std).
-                    # Clamp: only boost decayed bins (min=1.0), cap correction (max=1.15).
-                    _raw_gain = (1 - _beta) + _beta * (_ref_s / _cur_std)  # [B, C_a, 1, freq]
-                    _gain     = _raw_gain.clamp(min=1.0, max=1.15)
-                    # Apply: scale each bin around its mean — no DC shift.
-                    new_aud = ((new_aud.float() - _cur_mean) * _gain + _cur_mean).to(aud_out.dtype)
-                    # Logging: per-channel mean/max of applied gain, per-freq mean of gain,
-                    # and DC drift (mean[cur] - mean[ref]) to watch for offset accumulation.
+                    _raw_gain = _s1_audio_rms_ref / max(_aud_rms, 1e-6)
+                    if _raw_gain > 1.0:   # upward-only: correct decay, never attenuate
+                        _soft_gain = min(1.0 + _beta * (_raw_gain - 1.0), 1.15)
+                        new_aud = (new_aud.float() * _soft_gain).to(aud_out.dtype)
+                        print(f"[CLSS S1]   audio gain (scalar, upward-only): raw={_raw_gain:.4f} "
+                              f"applied={_soft_gain:.4f}  "
+                              f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f}")
+                    else:
+                        print(f"[CLSS S1]   audio gain: none (chunk louder than ref, raw={_raw_gain:.4f})")
+                    # Diagnostics only — no per-bin correction is applied.
                     with torch.no_grad():
-                        _ch_mean_gain = _gain.mean(dim=-1).squeeze().tolist()        # [C_a]
-                        _ch_max_gain  = _gain.max(dim=-1).values.squeeze().tolist()  # [C_a]
-                        _freq_gain    = _gain.mean(dim=1).squeeze().tolist()          # [freq]
-                        _dc_drift     = (_cur_mean - _ref_m).mean(dim=-1).squeeze().tolist()  # [C_a]
+                        _ref_m = _s1_audio_ref_mean.to(device)
+                        _ref_s = _s1_audio_ref_std.to(device)
+                        _std_ratio = (_ref_s / _cur_std).mean(dim=-1).squeeze().tolist()      # [C_a]
+                        _dc_drift  = (_cur_mean - _ref_m).mean(dim=-1).squeeze().tolist()     # [C_a]
                     print(
-                        f"[CLSS S1]   audio gain β={_beta} cap=1.15: "
-                        f"ch_mean_gain=[{' '.join(f'{v:.3f}' for v in _ch_mean_gain)}]  "
-                        f"ch_max_gain=[{' '.join(f'{v:.3f}' for v in _ch_max_gain)}]  "
-                        f"ch_dc_drift=[{' '.join(f'{v:+.4f}' for v in _dc_drift)}]\n"
-                        f"[CLSS S1]   audio freq_gain=[{' '.join(f'{v:.3f}' for v in _freq_gain)}]  "
-                        f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f}"
+                        f"[CLSS S1]   audio diag: ch_std_ratio(ref/cur)="
+                        f"[{' '.join(f'{v:.3f}' for v in _std_ratio)}]  "
+                        f"ch_dc_drift=[{' '.join(f'{v:+.4f}' for v in _dc_drift)}]"
                     )
                 if audio_overlap_af > 0:
                     ov = audio_overlap_af
@@ -823,19 +842,32 @@ class CLSSStreamingSampler:
                         audio_slb_latent = new_aud.cpu()   # short chunk — use all
                     print(f"[CLSS S1]   audio SLB saved: {audio_slb_latent.shape[2]}f  "
                           f"mean={audio_slb_latent.float().mean():.4f}")
-                    # ref_audio for next chunk: frames BEFORE the overlap period.
-                    # Must not include the overlap-time frames (those are in SLB above).
-                    pre_ov_end   = max(0, new_aud.shape[2] - ov)
-                    pre_ov_start = max(0, pre_ov_end - ov)
+                    # ref_audio for next chunk: frames BEFORE the overlap period,
+                    # taken from a rolling tail of accumulated output (reference
+                    # pipeline.py:771-806).  The tail keeps the last 2×ov frames across
+                    # chunk boundaries, so the reference window is always a FULL ov
+                    # frames ending immediately before the overlap — even when the
+                    # within-chunk pre-overlap region is shorter than ov.
+                    _tail_cur = new_aud.cpu()
+                    _s1_audio_tail = (
+                        _tail_cur if _s1_audio_tail is None
+                        else torch.cat([_s1_audio_tail, _tail_cur], dim=2)
+                    )
+                    if _s1_audio_tail.shape[2] > 2 * ov:
+                        _s1_audio_tail = _s1_audio_tail[:, :, -2 * ov:]
+                    _s1_audio_tail = _s1_audio_tail.clone()
+                    _tail_lf = _s1_audio_tail.shape[2]
+                    pre_ov_end = max(0, _tail_lf - ov)   # tail's last ov frames = next overlap
                     if pre_ov_end > 0:
-                        audio_overlap_latent = new_aud[:, :, pre_ov_start:pre_ov_end].cpu()
+                        _ref_start = max(0, pre_ov_end - ov)
+                        audio_overlap_latent = _s1_audio_tail[:, :, _ref_start:pre_ov_end].clone()
                         print(f"[CLSS S1]   audio ref saved: {audio_overlap_latent.shape[2]}f "
-                              f"[{pre_ov_start}:{pre_ov_end}]  "
+                              f"(tail[{_ref_start}:{pre_ov_end}], tail_len={_tail_lf})  "
                               f"mean={audio_overlap_latent.float().mean():.4f}")
                     else:
                         audio_overlap_latent = None
-                        print(f"[CLSS S1]   audio ref NOT saved: new_aud too short "
-                              f"({new_aud.shape[2]}f < {ov}f)")
+                        print(f"[CLSS S1]   audio ref NOT saved: tail too short "
+                              f"({_tail_lf}f ≤ {ov}f)")
                 acc_audio.append(new_aud.cpu())
                 audio_chunk_ends.append(sum(a.shape[2] for a in acc_audio))
                 _s1_aud_prev_last = new_aud[:, :, -1:].cpu()
@@ -1275,6 +1307,18 @@ class CLSSAVGuider:
                         "LTX-AV reference pipeline: audio_cfg=7.0 + modality guidance 3.0."
                     ),
                 }),
+                "rescale":   ("FLOAT",  {
+                    "default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": (
+                        "Per-modality CFG rescale (reference MultiModalGuider, "
+                        "rescale_scale=0.7).  Pulls the guided prediction's std back "
+                        "toward the conditional prediction's std:\n"
+                        "  factor = rescale·(cond.std/pred.std) + (1−rescale)\n"
+                        "Tames guidance overshoot — without it, audio at cfg=7 "
+                        "accumulates excess energy (high-freq bins overshoot, "
+                        "end-of-chunk RMS surge).  0.0 = off."
+                    ),
+                }),
             },
         }
 
@@ -1283,7 +1327,7 @@ class CLSSAVGuider:
     FUNCTION = "patch"
     CATEGORY = "LTX-CLSS"
 
-    def patch(self, guider, audio_cfg: float):
+    def patch(self, guider, audio_cfg: float, rescale: float = 0.7):
         import copy
         new_guider = copy.copy(guider)
         new_guider.model_options = comfy.model_patcher.create_model_options_clone(
@@ -1292,6 +1336,7 @@ class CLSSAVGuider:
 
         vid_cfg    = getattr(guider, "cfg", 1.0)
         _audio_cfg = audio_cfg
+        _rescale   = rescale
         _log_done  = [False]   # mutable cell so the closure can flip it once
 
         def _av_cfg_fn(args):
@@ -1308,7 +1353,25 @@ class CLSSAVGuider:
                 vid_denoised = vid_u + scale    * (vid_c - vid_u)
                 aud_denoised = aud_u + _audio_cfg * (aud_c - aud_u)
 
-                # Log prediction norms once to confirm the split is active
+                # Per-modality CFG rescale — the piece of the reference guider port
+                # that was missing.  cond.std is the "natural" scale of the model's
+                # prediction; guidance at cfg=7 inflates pred.std well beyond it, and
+                # that excess energy compounds over the denoising trajectory
+                # (observed: audio high-freq bins at 1.4-1.7× reference by chunk 3,
+                # end-of-chunk RMS surge).
+                _v_factor = _a_factor = 1.0
+                if _rescale > 0.0:
+                    with torch.no_grad():
+                        _v_factor = (_rescale * (vid_c.float().std()
+                                     / vid_denoised.float().std().clamp(min=1e-8))
+                                     + (1.0 - _rescale)).item()
+                        _a_factor = (_rescale * (aud_c.float().std()
+                                     / aud_denoised.float().std().clamp(min=1e-8))
+                                     + (1.0 - _rescale)).item()
+                    vid_denoised = vid_denoised * _v_factor
+                    aud_denoised = aud_denoised * _a_factor
+
+                # Log prediction norms + rescale factors once to confirm the split is active
                 if not _log_done[0]:
                     _log_done[0] = True
                     with torch.no_grad():
@@ -1316,7 +1379,8 @@ class CLSSAVGuider:
                         a_norm = (aud_c - aud_u).float().norm().item()
                     print(
                         f"[CLSS AVGuider] step-1 cfg_diff_norm: "
-                        f"vid({scale:.1f})={v_norm:.4f}  aud({_audio_cfg:.1f})={a_norm:.4f}"
+                        f"vid({scale:.1f})={v_norm:.4f}  aud({_audio_cfg:.1f})={a_norm:.4f}  "
+                        f"rescale={_rescale:.2f} factors: vid={_v_factor:.4f} aud={_a_factor:.4f}"
                     )
 
                 # sampler_cfg_function must return noise (x − denoised) — the caller does:
@@ -1331,7 +1395,8 @@ class CLSSAVGuider:
 
         new_guider.model_options["sampler_cfg_function"] = _av_cfg_fn
         new_guider.audio_cfg = _audio_cfg   # readable by downstream nodes for logging
-        print(f"[CLSS] AVGuider patched: video_cfg={vid_cfg:.2f}  audio_cfg={_audio_cfg:.2f}")
+        print(f"[CLSS] AVGuider patched: video_cfg={vid_cfg:.2f}  audio_cfg={_audio_cfg:.2f}  "
+              f"rescale={_rescale:.2f}")
         return (new_guider,)
 
 
