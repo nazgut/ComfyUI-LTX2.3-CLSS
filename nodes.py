@@ -36,7 +36,7 @@ import comfy.model_patcher
 import comfy.nested_tensor
 import comfy.sampler_helpers
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
-from comfy_extras.nodes_lt import LTXVAddGuide, _append_guide_attention_entry
+from comfy_extras.nodes_lt import LTXVAddGuide
 from comfy_extras.nodes_textgen import LTX2_T2V_SYSTEM_PROMPT
 
 from ltx_pipelines.streaming.clss import CLSSConfig, CLSSState
@@ -516,40 +516,27 @@ class CLSSStreamingSampler:
                     strength=1.0 - clss_config.tau_c,
                 )
 
-            # i2v: use append_keyframe so the model receives keyframe_idxs in
-            # conditioning — this is the LTX-native i2v mechanism that directs the
-            # model's attention toward the guide frame.  The guide is appended at
-            # the END of lat_vid, conditioning signals frame_idx=0 as the reference.
-            # In AV mode we skip guide_attention_entries (they bias audio tokens
-            # toward the guide video frame and can corrupt audio generation).
+            # i2v: in-place first-frame conditioning — the canonical LTX i2v path.
+            # ComfyUI's LTXVAddGuide itself uses replace_latent_frames for frame_idx=0;
+            # append_keyframe is the pathway for NON-aligned keyframes only.
+            #
+            # The previous append_keyframe approach added an extra video token block at
+            # the END of the sequence (RoPE pointing back to t=0).  In AV mode the audio
+            # tokens attend to that out-of-place block for the entire chunk — the same
+            # contamination class that forced skipping guide_attention_entries.  Chunk-1
+            # audio (which seeds the SLB/ref chain for the whole video) came out as
+            # noise/drone regardless of guidance settings.  In-place replacement keeps
+            # the token sequence clean: no appended block, no post-sample stripping, and
+            # audio temporal coverage matches video exactly.
             if is_first and img_guide_latent is not None:
-                pos_raw = _unconvert_cond(guider_chunk.original_conds.get("positive", []))
-                neg_raw = _unconvert_cond(guider_chunk.original_conds.get("negative", []))
-                pos_raw, neg_raw, lat_vid, mask_vid = LTXVAddGuide.append_keyframe(
-                    pos_raw, neg_raw,
-                    frame_idx=0,
-                    latent_image=lat_vid,
-                    noise_mask=mask_vid,
+                lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
+                    lat_vid, mask_vid,
                     guiding_latent=img_guide_latent.to(device),
-                    strength=1.0,
-                    scale_factors=i2v_scale_factors,
-                    in_channels=C_v,
-                    causal_fix=True,
+                    latent_idx=0,
+                    strength=1.0,   # noise_mask=0 → frame 0 fully conditioned
                 )
-                if not is_av:
-                    guide_latent_shape = list(img_guide_latent.shape[2:])
-                    pre_filter_count = (img_guide_latent.shape[2]
-                                        * img_guide_latent.shape[3]
-                                        * img_guide_latent.shape[4])
-                    pos_raw, neg_raw = _append_guide_attention_entry(
-                        pos_raw, neg_raw, pre_filter_count, guide_latent_shape, strength=1.0
-                    )
-                guider_chunk.original_conds = {
-                    **guider_chunk.original_conds,
-                    "positive": comfy.sampler_helpers.convert_cond(pos_raw),
-                    "negative": comfy.sampler_helpers.convert_cond(neg_raw),
-                }
-                print(f"[CLSS] i2v: guide appended to first chunk, lat_vid={list(lat_vid.shape)}")
+                print(f"[CLSS] i2v: guide placed in-place at frame 0, "
+                      f"lat_vid={list(lat_vid.shape)} (no appended tokens)")
 
             if aud_tmpl is not None:
                 # Audio latent covers same temporal span as video (overlap + new frames).
@@ -634,10 +621,9 @@ class CLSSStreamingSampler:
                 vid_out = denoised_samples
                 aud_out = None
 
-            # i2v: strip the trailing guide frame from video (guide has RoPE position frame_idx=0
-            # so audio coverage is already correct — no audio adjustment needed).
+            # i2v: nothing to strip — the guide is conditioned in-place at frame 0.
+            # Frame 0 of the output IS the (denoised-around) guide frame; log adherence.
             if is_first and img_guide_latent is not None:
-                vid_out = vid_out[:, :, :-1]
                 _guide_sim = _frame_cos(vid_out[:, :, 0], img_guide_latent.to(device)[:, :, 0])
                 print(f"[CLSS S1]   i2v guide adherence: {_guide_sim:.4f}")
 
@@ -1119,30 +1105,21 @@ class CLSSStage2:
             print(f"[CLSS S2]   {_astats(lat_vid, 'vid_in')}")
 
             # ── Stage 2 i2v: anchor chunk 1 frame 0 to guide image ──────────
+            # In-place replacement, same rationale as Stage 1: append_keyframe adds an
+            # out-of-place token block that the joint AV attention sees all chunk long.
+            # Frame 0 of the S2 latent already holds the upscaled S1 frame (which adhered
+            # to the guide); replacing it with the guide encoded at S2 resolution and
+            # freezing it (mask=0) pins the opening frame exactly.
             active_guider = guider
-            n_s2_guide = 0
             if is_first and s2_guide_latent is not None:
-                pos_raw = _unconvert_cond(guider.original_conds.get("positive", []))
-                neg_raw = _unconvert_cond(guider.original_conds.get("negative", []))
-                pos_raw, neg_raw, lat_vid, mask_vid = LTXVAddGuide.append_keyframe(
-                    pos_raw, neg_raw,
-                    frame_idx=0,
-                    latent_image=lat_vid,
-                    noise_mask=mask_vid,
+                lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
+                    lat_vid, mask_vid,
                     guiding_latent=s2_guide_latent.to(device),
+                    latent_idx=0,
                     strength=1.0,
-                    scale_factors=s2_i2v_scale_factors,
-                    in_channels=C_v,
-                    causal_fix=True,
                 )
-                n_s2_guide = 1
-                active_guider = copy.copy(guider)
-                active_guider.original_conds = {
-                    **guider.original_conds,
-                    "positive": comfy.sampler_helpers.convert_cond(pos_raw),
-                    "negative": comfy.sampler_helpers.convert_cond(neg_raw),
-                }
-                print(f"[CLSS S2] i2v: guide appended to S2 chunk 1, lat_vid={list(lat_vid.shape)}")
+                print(f"[CLSS S2] i2v: guide placed in-place at frame 0, "
+                      f"lat_vid={list(lat_vid.shape)} (no appended tokens)")
 
             # ── Audio chunk (Stage 2: mask=0, frozen Stage 1 passthrough) ─────────
             # mask=0.3 created a sigma mismatch: video at σ=0.91, audio at 0.3×σ=0.27.
@@ -1188,10 +1165,6 @@ class CLSSStage2:
             else:
                 vid_out  = d_samples
                 aud_out  = None
-
-            # Strip Stage 2 i2v guide frame (appended at end of chunk 1 only)
-            if n_s2_guide > 0:
-                vid_out = vid_out[:, :, :-n_s2_guide]
 
             new_vid = vid_out[:, :, chunk_overlap:]
             n_slb   = min(overlap_lf, actual_new)
