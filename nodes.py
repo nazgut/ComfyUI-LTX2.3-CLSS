@@ -1110,7 +1110,14 @@ class CLSSStage2:
         # chunks under the budget.  ~42k video tokens/chunk validated on 16 GB
         # (41.5k ran with offload).
         if frames_per_chunk <= 0:
+            # Probe free VRAM instead of assuming a 16 GB card.  42k video tokens
+            # validated at ~15.6 GB total; scale linearly with total VRAM, floor at
+            # 24k (below that, chunking overhead dominates anyway).
             _budget_tokens = 42000
+            if torch.cuda.is_available():
+                _total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                _budget_tokens = max(24000, int(42000 * _total_gb / 15.6))
+                print(f"[CLSS] auto: token budget={_budget_tokens} (VRAM={_total_gb:.1f} GB)")
             _fpc_cap = max(12, _budget_tokens // max(1, H * W))
             if T <= _fpc_cap:
                 frames_per_chunk = T
@@ -1363,6 +1370,21 @@ class CLSSStage2:
                     # refine: sim vs S1 measures how much the distilled pass changed
                     # the audio.  ~0.6-0.9 expected (real refinement); ~1.0 means the
                     # renoise did nothing; ~0 means S1 seeding isn't reaching the model.
+                    # Chunk-1 onset treatment (mirrors Stage 1): refined chunk-1 audio
+                    # regenerates from near-scratch at sigma_0 and shows the same t≈0
+                    # transient (observed min=-6.7 vs ±3 elsewhere).  Fade-in + per-
+                    # channel soft-clamp before the tail is saved or accumulated.
+                    if is_first:
+                        _n_fade = min(4, new_aud.shape[2])
+                        for _i in range(_n_fade):
+                            _a = 0.25 + 0.75 * (_i / max(1, _n_fade - 1))
+                            new_aud[:, :, _i] = new_aud[:, :, _i] * _a
+                        with torch.no_grad():
+                            _lim = (4.0 * new_aud.float().std(dim=(0, 2, 3), keepdim=False)
+                                    ).view(1, -1, 1, 1).to(new_aud.dtype)
+                        new_aud = torch.tanh(new_aud / _lim) * _lim
+                        print(f"[CLSS S2]   chunk-1 refined-audio fade+clamp applied  "
+                              f"new_abs_max={new_aud.float().abs().max():.4f}")
                     print(f"[CLSS S2]   {_astats(new_aud, 'aud_out(refined)')}"
                           f"  s1_seed_sim={_s1_sim:.4f}")
                     if a_ov > 0 and s2_audio_overlap is not None:
