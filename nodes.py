@@ -193,42 +193,34 @@ class CLSSConfigNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "tau_c":              ("FLOAT", {"default": 0.05, "min": 0.0, "max": 0.5,  "step": 0.01,
-                                                 "tooltip": "Overlap re-noising level. 0=frozen, 0.05=paper default."}),
-                "beta":               ("FLOAT", {"default": 0.40, "min": 0.0, "max": 1.0,  "step": 0.05,
-                                                 "tooltip": "AdaIN drift correction strength. 0=off, 0.4=paper default."}),
-                "ema_lambda":         ("FLOAT", {"default": 0.10, "min": 0.01, "max": 0.5, "step": 0.01,
-                                                 "tooltip": "EMA update rate per chunk."}),
-                "overlap":            ("INT",   {"default": 8,    "min": 1,   "max": 32,
-                                                 "tooltip": "Overlap latent frames shared between chunks."}),
-                "anchor_force_every": ("INT",   {"default": 5,    "min": 0,   "max": 50,
-                                                 "tooltip": "Force new anchor bank entry every N chunks. 0=disabled."}),
-                "sigma_max_drift":    ("FLOAT", {"default": 0.05, "min": 0.0, "max": 0.5,  "step": 0.01,
-                                                 "tooltip": "Max EMA std drift from chunk-0."}),
-                "adain_max_amplification": ("FLOAT", {"default": 1.2, "min": 0.0, "max": 3.0, "step": 0.05,
-                                                      "tooltip": "Cap per-channel AdaIN upward amplification. "
-                                                                 "Prevents AdaIN from boosting residual denoising noise. "
-                                                                 "1.2 = allow at most 20% std increase per channel. "
-                                                                 "0.0 = no cap (original behaviour, may add grain). "
-                                                                 "Recommended: 1.2 when grain is visible."}),
+                "tau_c":   ("FLOAT", {"default": 0.05, "min": 0.0, "max": 0.5,  "step": 0.01,
+                                      "tooltip": "Overlap re-noising level. 0=frozen, 0.05=paper default. "
+                                                 "The one continuity/freshness trade-off worth exposing."}),
+                "beta":    ("FLOAT", {"default": 0.40, "min": 0.0, "max": 1.0,  "step": 0.05,
+                                      "tooltip": "AdaIN drift correction strength. 0=off, 0.4=paper default."}),
+                "overlap": ("INT",   {"default": 8,    "min": 1,   "max": 32,
+                                      "tooltip": "Overlap latent frames shared between chunks."}),
             }
         }
+        # Everything else is fixed or derived automatically:
+        #   ema_lambda=0.10, sigma_max_drift=0.05, adain_max_amplification=1.2
+        #   (validated internals — wrong values silently corrupt the video);
+        #   anchor_force_every is derived from num_chunks inside the sampler.
 
     RETURN_TYPES = ("CLSS_CONFIG",)
     RETURN_NAMES = ("clss_config",)
     FUNCTION = "build"
     CATEGORY = "LTX-CLSS"
 
-    def build(self, tau_c, beta, ema_lambda, overlap, anchor_force_every, sigma_max_drift,
-              adain_max_amplification):
+    def build(self, tau_c, beta, overlap):
         return (CLSSConfig(
             tau_c=tau_c,
             beta=beta,
-            ema_lambda=ema_lambda,
-            ema_sigma_max_drift=sigma_max_drift,
-            anchor_force_every=anchor_force_every,
+            ema_lambda=0.10,                 # fixed: validated EMA rate
+            ema_sigma_max_drift=0.05,        # fixed: prevents late-chunk amplification
+            anchor_force_every=0,            # sentinel: auto-derived in the sampler
             overlap_latent_frames=overlap,
-            adain_max_amplification=adain_max_amplification,
+            adain_max_amplification=1.2,     # fixed: caps AdaIN grain boost
             measure_g=False,
         ),)
 
@@ -330,8 +322,8 @@ class CLSSStreamingSampler:
                                                "Resized automatically to match the latent spatial dimensions."}),
                 "vae":   ("VAE",   {"tooltip": "VAE for encoding the i2v guide image. "
                                                "Connect the VAE from LTXVideo Loader. Required when image is connected."}),
-                "audio_slb": (["on", "off"], {
-                    "default": "on",
+                "audio_slb": (["auto", "on", "off"], {
+                    "default": "auto",
                     "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
                                "design).  off: reference-pipeline design — overlap audio is "
                                "regenerated at full noise and dropped; continuity via ref_audio "
@@ -359,8 +351,28 @@ class CLSSStreamingSampler:
         num_chunks: int,
         image=None,
         vae=None,
-        audio_slb: str = "on",
+        audio_slb: str = "auto",
     ):
+        import dataclasses
+        import math
+
+        # ── Auto-derived settings (length-dependent — not user knobs) ──────
+        # anchor_force_every: force a bank entry roughly every quarter of the run
+        # so the anchor bank actually grows on long videos (7 chunks previously
+        # produced bank_size=2 with the fixed default of 5) while never anchoring
+        # more often than every 2 chunks.
+        if clss_config.anchor_force_every <= 0:
+            _auto_anchor = max(2, min(5, math.ceil(num_chunks / 4)))
+            clss_config = dataclasses.replace(clss_config, anchor_force_every=_auto_anchor)
+            print(f"[CLSS] auto: anchor_force_every={_auto_anchor} (num_chunks={num_chunks})")
+        # audio_slb: short runs benefit from the frozen-tail boundary continuity;
+        # long runs showed SLB feedback runaway (RMS 0.52→0.82, high-freq 3.8×
+        # over 7 chunks).  Length decides; explicit on/off remains for A/B only.
+        if audio_slb == "auto":
+            audio_slb = "on" if num_chunks <= 4 else "off"
+            print(f"[CLSS] auto: audio_slb={audio_slb} (num_chunks={num_chunks}; "
+                  f"SLB feedback compounds on long runs)")
+
         samples = latent["samples"]
 
         # Split AV template → video [1,128,F_v,H,W] + optional audio [1,C,F_a,freq]
@@ -1013,8 +1025,10 @@ class CLSSStage2:
                 }),
                 "clss_config":      ("CLSS_CONFIG", {}),
                 "frames_per_chunk": ("INT",         {
-                    "default": 21, "min": 1, "max": 128,
-                    "tooltip": "Number of NEW latent frames refined per Stage 2 chunk.\n\n"
+                    "default": 0, "min": 0, "max": 128,
+                    "tooltip": "0 = AUTO (recommended): single chunk when the token budget "
+                               "allows (no boundary seam), else fewest evenly-sized chunks.\n\n"
+                               "Manual override — number of NEW latent frames per Stage 2 chunk.\n\n"
                                "Higher values = fewer chunks = faster overall (fewer model loads), "
                                "but more VRAM per chunk. Lower values fit tighter VRAM budgets.\n\n"
                                "Stage 2 is closed-loop refinement anchored to the Stage 1 upscaled "
@@ -1087,6 +1101,30 @@ class CLSSStage2:
             a_ov_af = round(overlap_lf * T_a / T) if T > 0 else 0
         else:
             B_a = C_a = T_a = freq = a_ov_af = 0
+
+        import math as _math
+        # ── Auto-derived Stage 2 chunking (length/resolution-dependent) ─────
+        # frames_per_chunk=0 → auto: fit the whole video in ONE chunk when the
+        # token budget allows (no chunk boundary = no morphing seam — official
+        # unchunked-stage-2 parity); otherwise pick the fewest, evenly-sized
+        # chunks under the budget.  ~42k video tokens/chunk validated on 16 GB
+        # (41.5k ran with offload).
+        if frames_per_chunk <= 0:
+            _budget_tokens = 42000
+            _fpc_cap = max(12, _budget_tokens // max(1, H * W))
+            if T <= _fpc_cap:
+                frames_per_chunk = T
+            else:
+                _n = _math.ceil(T / _fpc_cap)
+                frames_per_chunk = _math.ceil(T / _n)
+            print(f"[CLSS] auto: frames_per_chunk={frames_per_chunk} "
+                  f"(T={T}, tokens/frame={H * W}, budget≈{_budget_tokens})")
+        # s2_overlap=0 → auto: ~a third of the chunk, clamped [8, 16]; irrelevant
+        # for single-chunk runs.
+        if s2_overlap <= 0 and frames_per_chunk < T:
+            s2_overlap = min(16, max(8, frames_per_chunk // 3))
+            overlap_lf = s2_overlap
+            print(f"[CLSS] auto: s2_overlap={s2_overlap}")
 
         num_chunks = max(1, (T + frames_per_chunk - 1) // frames_per_chunk)
         # Evenly distribute T so no runt last chunk (e.g. avoids [21,21,21,21,9]).
