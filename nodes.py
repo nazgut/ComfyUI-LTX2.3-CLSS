@@ -1164,6 +1164,23 @@ class CLSSStage2:
             overlap_lf = s2_overlap
             print(f"[CLSS] auto: s2_overlap={s2_overlap}")
 
+        # Hard guard against a needless chunk boundary (the #1 source of the
+        # ~6s morph): if the WHOLE video fits the token budget, refine it in one
+        # chunk regardless of a manually-set frames_per_chunk.  ComfyUI keeps old
+        # widget values across node-default changes, so a stale fpc (e.g. 31 from
+        # an earlier experiment) would otherwise re-introduce the seam even though
+        # the auto default is 0.  A boundary is only ever created when the video
+        # genuinely does not fit — never as a leftover setting.
+        _guard_budget = 42000
+        if torch.cuda.is_available():
+            _guard_budget = max(24000, int(42000 *
+                (torch.cuda.get_device_properties(0).total_memory / 1024**3) / 15.6))
+        if frames_per_chunk < T and T * H * W <= _guard_budget:
+            print(f"[CLSS] guard: overriding frames_per_chunk={frames_per_chunk}→{T} "
+                  f"— whole video ({T * H * W} tokens) fits budget ({_guard_budget}); "
+                  f"a single chunk avoids the Stage-2 boundary seam/morph.")
+            frames_per_chunk = T
+
         num_chunks = max(1, (T + frames_per_chunk - 1) // frames_per_chunk)
         # Evenly distribute T so no runt last chunk (e.g. avoids [21,21,21,21,9]).
         # Each chunk gets either ceil(T/N) or floor(T/N) frames, differing by at most 1.

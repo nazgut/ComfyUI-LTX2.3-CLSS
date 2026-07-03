@@ -573,7 +573,7 @@
   },
   "98": {
     "inputs": {
-      "frames_per_chunk": 21,
+      "frames_per_chunk": 0,
       "guider": [
         "31",
         0
