@@ -995,6 +995,12 @@ class CLSSStage2:
                                                "Re-encoded at Stage 2 full resolution to anchor chunk 1."}),
                 "vae":   ("VAE",   {"tooltip": "VAE for encoding the Stage 2 i2v guide. "
                                                "Required when image is connected."}),
+                "s2_overlap": ("INT", {
+                    "default": 0, "min": 0, "max": 32,
+                    "tooltip": "Stage 2 SLB overlap in latent frames. 0 = use clss_config's "
+                               "overlap (default). Raise (e.g. 12-16) to strengthen chunk-boundary "
+                               "continuity in Stage 2 without touching Stage 1 — more frozen "
+                               "context per chunk at the cost of more tokens per chunk."}),
                 "audio_mode": (["refine", "freeze"], {
                     "default": "refine",
                     "tooltip": "refine (default): re-noise Stage-1 audio to sigma_0 and refine it "
@@ -1016,7 +1022,7 @@ class CLSSStage2:
     @torch.inference_mode()
     def sample(self, guider, sampler, sigmas, noise, latent,
                clss_config: CLSSConfig, frames_per_chunk: int,
-               image=None, vae=None, audio_mode: str = "refine"):
+               image=None, vae=None, audio_mode: str = "refine", s2_overlap: int = 0):
         samples = latent["samples"]
         is_av = isinstance(samples, comfy.nested_tensor.NestedTensor)
         if is_av:
@@ -1027,7 +1033,7 @@ class CLSSStage2:
 
         B, C_v, T, H, W = full_vid.shape
         device = full_vid.device
-        overlap_lf = clss_config.overlap_latent_frames
+        overlap_lf = s2_overlap if s2_overlap > 0 else clss_config.overlap_latent_frames
 
         # Pre-encode i2v guide at Stage 2 (full) resolution.
         # Stage 1 chunk 1 anchors frame 0 to the guide image; without the same
