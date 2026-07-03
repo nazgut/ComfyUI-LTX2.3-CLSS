@@ -322,6 +322,17 @@ class CLSSStreamingSampler:
                                                "Resized automatically to match the latent spatial dimensions."}),
                 "vae":   ("VAE",   {"tooltip": "VAE for encoding the i2v guide image. "
                                                "Connect the VAE from LTXVideo Loader. Required when image is connected."}),
+                "length_seconds": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.5,
+                    "tooltip": "Requested video duration in seconds.  When > 0, num_chunks is "
+                               "DERIVED from this (reference build_chunk_schedule behaviour): "
+                               "total latent frames = ceil from duration at `fps`, chunks = "
+                               "ceil(total_lf / new_lf).  Actual duration (rounded up to whole "
+                               "chunks) is logged.  0 = use the num_chunks input directly."}),
+                "fps": ("FLOAT", {
+                    "default": 25.0, "min": 1.0, "max": 60.0, "step": 1.0,
+                    "tooltip": "Frame rate used to convert length_seconds to frames.  Must match "
+                               "the frame_rate set on LTXVConditioning."}),
                 "audio_slb": (["auto", "on", "off"], {
                     "default": "auto",
                     "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
@@ -352,9 +363,29 @@ class CLSSStreamingSampler:
         image=None,
         vae=None,
         audio_slb: str = "auto",
+        length_seconds: float = 0.0,
+        fps: float = 25.0,
     ):
         import dataclasses
         import math
+
+        # ── Length-derived chunk count (reference build_chunk_schedule parity) ──
+        # The chunk count is a function of the requested duration, not a knob:
+        # total px = duration·fps → total lf via the causal mapping lf=(px−1)/8+1
+        # → chunks = ceil(total_lf / new_lf).  Rounded UP to whole chunks; the
+        # actual delivered duration is logged.
+        if length_seconds > 0.0:
+            _tmpl = latent["samples"]
+            _vid_t = (_tmpl.unbind()[0] if isinstance(_tmpl, comfy.nested_tensor.NestedTensor)
+                      else _tmpl)
+            _chunk_lf = _vid_t.shape[2]
+            _total_px = max(1, round(length_seconds * fps))
+            _total_lf = (_total_px - 1) // 8 + 1
+            num_chunks = max(1, math.ceil(_total_lf / _chunk_lf))
+            _actual_px = (num_chunks * _chunk_lf - 1) * 8 + 1
+            print(f"[CLSS] auto: num_chunks={num_chunks} from length={length_seconds:.1f}s "
+                  f"@{fps:.0f}fps ({_total_px}px → {_total_lf}lf, chunk={_chunk_lf}lf) — "
+                  f"actual={_actual_px / fps:.2f}s")
 
         # ── Auto-derived settings (length-dependent — not user knobs) ──────
         # anchor_force_every: force a bank entry roughly every quarter of the run
