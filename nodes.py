@@ -330,6 +330,15 @@ class CLSSStreamingSampler:
                                                "Resized automatically to match the latent spatial dimensions."}),
                 "vae":   ("VAE",   {"tooltip": "VAE for encoding the i2v guide image. "
                                                "Connect the VAE from LTXVideo Loader. Required when image is connected."}),
+                "audio_slb": (["on", "off"], {
+                    "default": "on",
+                    "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
+                               "design).  off: reference-pipeline design — overlap audio is "
+                               "regenerated at full noise and dropped; continuity via ref_audio "
+                               "only.  The SLB is a feedback path: a drifting audio tail gets "
+                               "frozen into the next chunk's context and compounds (observed: "
+                               "RMS +58% and high-freq +280% over 7 chunks).  Use 'off' to A/B "
+                               "whether the SLB loop drives the drift."}),
             },
         }
 
@@ -350,6 +359,7 @@ class CLSSStreamingSampler:
         num_chunks: int,
         image=None,
         vae=None,
+        audio_slb: str = "on",
     ):
         samples = latent["samples"]
 
@@ -390,16 +400,27 @@ class CLSSStreamingSampler:
         # Without this, each chunk starts from pure noise → incoherent audio, broken dialog.
         if aud_tmpl is not None:
             B_a, C_a, new_af, freq = aud_tmpl.shape
-            # Pixel-time-based mapping (matches reference pipeline.py):
-            # latent frames → pixel frames via the causal VAE formula (lf−1)·8+1,
-            # then scale audio frames by the pixel-time ratio.  The old tensor-ratio
-            # formula round(overlap_lf·new_af/new_lf) overestimated the overlap span
-            # (63 vs 60 for 8/13/102), freezing audio into time owned by new video.
-            _overlap_px = (overlap_lf - 1) * 8 + 1
-            _new_px     = (new_lf - 1) * 8 + 1
-            audio_overlap_af = round(_overlap_px / _new_px * new_af) if new_lf > 0 else 0
+            # Audio timeline accounting — continuation pixel mapping.
+            # The causal discount (lf−1)·8+1 applies ONCE, at the very first video
+            # frame of the whole sequence.  Every subsequent latent frame covers a
+            # full 8 px.  The audio template (new_af for a standalone new_lf chunk)
+            # defines the af-per-px rate: af_per_px = new_af / ((new_lf−1)·8+1).
+            #   chunk 1 keeps new_af (covers (new_lf−1)·8+1 px)
+            #   chunks 2+ keep new_af_cont = round(new_lf·8·af_per_px)  (cover new_lf·8 px)
+            #   overlap (a continuation) covers overlap_lf·8 px → audio_overlap_af af
+            # The old accounting kept new_af per chunk regardless, undercounting each
+            # non-first chunk by 7 px ≈ 0.28 s — a cumulative A/V desync (~1.7 s at
+            # 7 chunks: audio ended ~2 s before the video).
+            _first_px  = (new_lf - 1) * 8 + 1
+            _af_per_px = new_af / _first_px if _first_px > 0 else 0.0
+            audio_overlap_af = round(overlap_lf * 8 * _af_per_px)
+            new_af_cont      = round(new_lf * 8 * _af_per_px)
+            print(f"[CLSS] audio accounting: af_per_px={_af_per_px:.4f}  "
+                  f"chunk1={new_af}af  chunks2+={new_af_cont}af  overlap={audio_overlap_af}af  "
+                  f"total={new_af + (num_chunks - 1) * new_af_cont}af for "
+                  f"{(num_chunks * new_lf - 1) * 8 + 1}px")
         else:
-            B_a = C_a = new_af = freq = audio_overlap_af = 0
+            B_a = C_a = new_af = freq = audio_overlap_af = new_af_cont = 0
 
         # Read scene conditionings already stored inside the guider.
         # original_conds["positive"] is a list of converted cond dicts (one per scene
@@ -541,7 +562,9 @@ class CLSSStreamingSampler:
 
             if aud_tmpl is not None:
                 # Audio latent covers same temporal span as video (overlap + new frames).
-                chunk_af = (audio_overlap_af if not is_first else 0) + new_af
+                # cur_new_af: chunk-1 covers (new_lf−1)·8+1 px; later chunks new_lf·8 px.
+                cur_new_af = new_af if is_first else new_af_cont
+                chunk_af = (audio_overlap_af if not is_first else 0) + cur_new_af
                 lat_aud  = torch.zeros(B_a, C_a, chunk_af, freq, device=device)
                 # [B, 1, T, 1] broadcasts correctly through reshape_mask → [B, C, T, freq]
                 mask_aud = torch.ones(B_a, 1, chunk_af, 1, device=device)
@@ -551,13 +574,16 @@ class CLSSStreamingSampler:
                 # → per-token a_timestep.  Without tau_c here, overlap audio tokens get
                 # full-sigma a_timestep → a2v cross-attention treats them as maximally
                 # noisy even though video SLB is near-clean → video discontinuity.
-                if has_aud_slb:
+                if has_aud_slb and audio_slb == "on":
                     slb = audio_slb_latent.to(device)
                     n   = min(audio_overlap_af, slb.shape[2], chunk_af)
                     lat_aud[:, :, :n]  = slb[:, :, :n]
                     mask_aud[:, :, :n] = clss_config.tau_c
                     print(f"[CLSS S1]   audio SLB: {n}f  tau_c={clss_config.tau_c}  "
                           f"mean={slb[:, :, :n].float().mean():.4f}")
+                elif has_aud_slb:
+                    print(f"[CLSS S1]   audio SLB: OFF (reference design — overlap audio "
+                          f"regenerated at mask=1 and dropped; continuity via ref_audio only)")
 
                 # ref_audio at negative RoPE positions: temporal context for what
                 # preceded this chunk (av_model.py line 708 prepends ref tokens).
@@ -800,14 +826,23 @@ class CLSSStreamingSampler:
                 else:
                     _beta = 0.3
                     _raw_gain = _s1_audio_rms_ref / max(_aud_rms, 1e-6)
-                    if _raw_gain > 1.0:   # upward-only: correct decay, never attenuate
-                        _soft_gain = min(1.0 + _beta * (_raw_gain - 1.0), 1.15)
+                    # SYMMETRIC gain (deviation from the reference's upward-only rule,
+                    # deliberate): the reference has no audio SLB, so its only failure
+                    # mode is decay.  Our SLB feeds the chunk tail forward, and the
+                    # 7-chunk run showed runaway GROWTH (RMS 0.52→0.82, raw gains down
+                    # to 0.76) that upward-only correction structurally cannot touch —
+                    # the hot tail freezes into the next SLB and compounds.  β-blended
+                    # and clamped to [0.87, 1.15] so it damps the loop without hard
+                    # normalization.
+                    _soft_gain = 1.0 + _beta * (_raw_gain - 1.0)
+                    _soft_gain = min(max(_soft_gain, 0.87), 1.15)
+                    if abs(_soft_gain - 1.0) > 0.005:
                         new_aud = (new_aud.float() * _soft_gain).to(aud_out.dtype)
-                        print(f"[CLSS S1]   audio gain (scalar, upward-only): raw={_raw_gain:.4f} "
+                        print(f"[CLSS S1]   audio gain (scalar, symmetric): raw={_raw_gain:.4f} "
                               f"applied={_soft_gain:.4f}  "
                               f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f}")
                     else:
-                        print(f"[CLSS S1]   audio gain: none (chunk louder than ref, raw={_raw_gain:.4f})")
+                        print(f"[CLSS S1]   audio gain: none (raw={_raw_gain:.4f} ≈ 1)")
                     # Diagnostics only — no per-bin correction is applied.
                     with torch.no_grad():
                         _ref_m = _s1_audio_ref_mean.to(device)
