@@ -400,9 +400,17 @@ class CLSSStreamingSampler:
         # long runs showed SLB feedback runaway (RMS 0.52→0.82, high-freq 3.8×
         # over 7 chunks).  Length decides; explicit on/off remains for A/B only.
         if audio_slb == "auto":
-            audio_slb = "on" if num_chunks <= 4 else "off"
-            print(f"[CLSS] auto: audio_slb={audio_slb} (num_chunks={num_chunks}; "
-                  f"SLB feedback compounds on long runs)")
+            # Previously auto-disabled beyond 4 chunks because the frozen SLB fed
+            # audio energy/DC drift forward and it compounded.  That reason is now
+            # removed: the per-chunk hard anchor to chunk-0 (RMS+DC) is applied
+            # BEFORE new_aud feeds the SLB/ref, so the fed-forward context can no
+            # longer drift.  Without the SLB, ref_audio is the only cross-chunk
+            # continuity and it is too weak (measured audio boundary cos ~0.14 over
+            # 15 chunks — audible timbral seams every chunk).  Keep the SLB ON at
+            # any length; the anchor keeps it stable.
+            audio_slb = "on"
+            print(f"[CLSS] auto: audio_slb=on (energy anchor makes the SLB safe at any "
+                  f"length; provides cross-chunk audio content continuity)")
 
         samples = latent["samples"]
 
@@ -514,6 +522,7 @@ class CLSSStreamingSampler:
 
         # Tracking state for per-chunk coherence metrics (§items 1,2,6)
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
+        _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
         _s1_aud_prev_last:   torch.Tensor | None = None  # [B, C_a, 1, freq] last audio frame
         _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean (diagnostics)
         _s1_audio_ref_std:   torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) std (diagnostics)
@@ -702,6 +711,25 @@ class CLSSStreamingSampler:
             mu_pre    = new_vid.mean().item()
             std_pre   = new_vid.std().item()
             corrected = clss_state.post_process(new_vid)
+            # Gentle global-std anchor to chunk-0.  The EMA AdaIN corrects per-channel
+            # stats but its sigma cap still permits ~+5% cumulative std growth over a
+            # long run (measured 1.008→1.054 over 15 chunks); late chunks run hot, and
+            # Stage 2 inherits progressively hotter latents, dropping fidelity toward
+            # the end.  Here we only correct the GLOBAL std when it drifts beyond ±4%
+            # of chunk-0, and only partially (blend 0.5) — enough to stop the monotonic
+            # creep without flattening legitimate per-scene contrast changes.  Mean is
+            # left untouched (it carries scene evolution).
+            if _s1_vid_std_ref is None:
+                _s1_vid_std_ref = corrected.float().std().item()
+            else:
+                _cur_vstd = corrected.float().std().item()
+                _ratio = _s1_vid_std_ref / max(_cur_vstd, 1e-6)
+                if _ratio < 0.96 or _ratio > 1.04:      # only when drift exceeds ±4%
+                    _g_v = 1.0 + 0.5 * (_ratio - 1.0)   # partial pull toward chunk-0
+                    _m = corrected.float().mean()
+                    corrected = ((corrected.float() - _m) * _g_v + _m).to(corrected.dtype)
+                    print(f"[CLSS S1]   video std anchor: {_cur_vstd:.4f}→"
+                          f"{corrected.float().std().item():.4f} (ref={_s1_vid_std_ref:.4f}, g={_g_v:.4f})")
             mu_post   = corrected.mean().item()
             std_post  = corrected.std().item()
             clss_state.update_buffer(corrected)
