@@ -854,49 +854,46 @@ class CLSSStreamingSampler:
                 # decayed even when their |x| energy already sat 1.4-1.7× ABOVE the
                 # chunk-0 reference (the high-freq overshoot at audio_cfg=7).  A per-bin
                 # correction that can only add energy amplifies exactly the bins the
-                # rescaled guidance should be taming.  Per-bin std ratios and DC drift
-                # are kept below as log-only diagnostics.
-                with torch.no_grad():
-                    _cur_mean = new_aud.float().mean(dim=2, keepdim=True)  # [B, C_a, 1, freq]
-                    _cur_std  = new_aud.float().std(dim=2, keepdim=True).clamp(min=1e-6)
+                # rescaled guidance should be taming.  Replaced by a hard per-chunk
+                # anchor to chunk-0 (RMS + per-channel DC) applied before the audio
+                # feeds the SLB/ref — see below.
                 if _s1_audio_rms_ref is None:
                     _skip = min(16, new_aud.shape[2])
                     _ref_aud = new_aud[:, :, _skip:] if new_aud.shape[2] > _skip else new_aud
                     _s1_audio_rms_ref  = _ref_aud.float().pow(2).mean().sqrt().item()
-                    _s1_audio_ref_mean = _cur_mean.cpu()   # DC reference for drift logging
+                    # Per-channel DC reference (onset-excluded) — the anchor the loop
+                    # must be pulled back to every chunk, not just logged against.
+                    _s1_audio_ref_mean = _ref_aud.float().mean(dim=2, keepdim=True).cpu()
                     _s1_audio_ref_std  = _ref_aud.float().std(dim=2, keepdim=True).clamp(min=1e-6).cpu()
                     print(f"[CLSS S1]   audio rms_ref={_s1_audio_rms_ref:.4f} (onset-excluded)")
                 else:
-                    _beta = 0.3
-                    _raw_gain = _s1_audio_rms_ref / max(_aud_rms, 1e-6)
-                    # SYMMETRIC gain (deviation from the reference's upward-only rule,
-                    # deliberate): the reference has no audio SLB, so its only failure
-                    # mode is decay.  Our SLB feeds the chunk tail forward, and the
-                    # 7-chunk run showed runaway GROWTH (RMS 0.52→0.82, raw gains down
-                    # to 0.76) that upward-only correction structurally cannot touch —
-                    # the hot tail freezes into the next SLB and compounds.  β-blended
-                    # and clamped to [0.87, 1.15] so it damps the loop without hard
-                    # normalization.
-                    _soft_gain = 1.0 + _beta * (_raw_gain - 1.0)
-                    _soft_gain = min(max(_soft_gain, 0.87), 1.15)
-                    if abs(_soft_gain - 1.0) > 0.005:
-                        new_aud = (new_aud.float() * _soft_gain).to(aud_out.dtype)
-                        print(f"[CLSS S1]   audio gain (scalar, symmetric): raw={_raw_gain:.4f} "
-                              f"applied={_soft_gain:.4f}  "
-                              f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f}")
-                    else:
-                        print(f"[CLSS S1]   audio gain: none (raw={_raw_gain:.4f} ≈ 1)")
-                    # Diagnostics only — no per-bin correction is applied.
+                    # HARD anchor to chunk-0, applied BEFORE new_aud feeds the SLB /
+                    # ref_audio / tail.  The 15-chunk run proved the audio path is a
+                    # DIVERGENT autoregressive loop: each chunk's drifted output (RMS
+                    # and DC) becomes the next chunk's ref_audio, the model continues
+                    # the trend, and RMS quadrupled (0.6→2.66) with DC marching to
+                    # −3.5 and high-freq to 12× reference.  A soft β-blended, clamped
+                    # gain (old behaviour) pinned at its 0.87 floor while raw wanted
+                    # 0.23 — it damped the OUTPUT but left the fed-forward context
+                    # drifted, so the loop kept its fuel.
+                    #   Fix: (1) remove per-channel DC drift entirely (subtract the
+                    #   chunk's mean, restore chunk-0's mean), and (2) match global RMS
+                    #   to chunk-0 exactly.  Both are lossless w.r.t. audio CONTENT
+                    #   (shift + scale) but reset the two quantities that compound.
+                    #   This is open-loop generation with a fixed anchor — the correct
+                    #   regime for autoregressive stability — not the reference's
+                    #   single-pass upward-only nudge.
                     with torch.no_grad():
-                        _ref_m = _s1_audio_ref_mean.to(device)
-                        _ref_s = _s1_audio_ref_std.to(device)
-                        _std_ratio = (_ref_s / _cur_std).mean(dim=-1).squeeze().tolist()      # [C_a]
-                        _dc_drift  = (_cur_mean - _ref_m).mean(dim=-1).squeeze().tolist()     # [C_a]
-                    print(
-                        f"[CLSS S1]   audio diag: ch_std_ratio(ref/cur)="
-                        f"[{' '.join(f'{v:.3f}' for v in _std_ratio)}]  "
-                        f"ch_dc_drift=[{' '.join(f'{v:+.4f}' for v in _dc_drift)}]"
-                    )
+                        _ref_m = _s1_audio_ref_mean.to(device)                 # [B,C,1,freq]
+                        _cur_m = new_aud.float().mean(dim=2, keepdim=True)
+                        _tmp   = new_aud.float() - _cur_m + _ref_m             # DC → chunk-0
+                        _rms_t = _tmp.pow(2).mean().sqrt().clamp(min=1e-6)
+                        _g     = _s1_audio_rms_ref / _rms_t
+                    new_aud = (_tmp * _g).to(aud_out.dtype)
+                    _dc_removed = (_cur_m - _ref_m).mean(dim=-1).squeeze().tolist()
+                    print(f"[CLSS S1]   audio anchor→chunk0: rms {_aud_rms:.4f}→"
+                          f"{new_aud.float().pow(2).mean().sqrt().item():.4f} (g={_g.item():.4f})  "
+                          f"DC removed/ch=[{' '.join(f'{v:+.3f}' for v in _dc_removed)}]")
                 if audio_overlap_af > 0:
                     ov = audio_overlap_af
                     # Audio SLB for next chunk: last ov frames of new_aud = the temporal
@@ -944,7 +941,14 @@ class CLSSStreamingSampler:
             print(f"[CLSS] Stage 1 full_aud assembled: shape={list(full_aud.shape)} "
                   f"mean={full_aud.float().mean():.4f} std={full_aud.float().std():.4f} "
                   f"nan={full_aud.isnan().any().item()} inf={full_aud.isinf().any().item()}")
-            full_aud = _post_process_audio_latent(full_aud, audio_chunk_ends, label=" S1")
+            # energy_beta=0: per-chunk RMS is already anchored to chunk-0 inside the
+            # loop (see "audio anchor→chunk0").  The old median-RMS renorm here would
+            # re-normalize toward the median of already-matched chunks — pure noise at
+            # best, and on the pre-fix runaway it dragged quiet early chunks UP toward
+            # the blown-up late ones, baking in a distance→loud ramp.  Keep only the
+            # boundary smoothing.
+            full_aud = _post_process_audio_latent(full_aud, audio_chunk_ends,
+                                                  energy_beta=0.0, label=" S1")
             print(f"[CLSS] Stage 1 full_aud post: shape={list(full_aud.shape)} "
                   f"mean={full_aud.float().mean():.4f} std={full_aud.float().std():.4f} "
                   f"min={full_aud.float().min():.4f} max={full_aud.float().max():.4f}")
