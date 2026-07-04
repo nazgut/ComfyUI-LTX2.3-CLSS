@@ -1081,8 +1081,8 @@ class CLSSStage2:
                                "overlap (default). Raise (e.g. 12-16) to strengthen chunk-boundary "
                                "continuity in Stage 2 without touching Stage 1 — more frozen "
                                "context per chunk at the cost of more tokens per chunk."}),
-                "audio_mode": (["refine", "freeze"], {
-                    "default": "refine",
+                "audio_mode": (["decoupled", "refine", "freeze"], {
+                    "default": "decoupled",
                     "tooltip": "refine (default): re-noise Stage-1 audio to sigma_0 and refine it "
                                "through the distilled 3-step schedule alongside the video — matches "
                                "the official ti2vid_two_stages pipeline "
@@ -1102,7 +1102,7 @@ class CLSSStage2:
     @torch.inference_mode()
     def sample(self, guider, sampler, sigmas, noise, latent,
                clss_config: CLSSConfig, frames_per_chunk: int,
-               image=None, vae=None, audio_mode: str = "refine", s2_overlap: int = 0):
+               image=None, vae=None, audio_mode: str = "decoupled", s2_overlap: int = 0):
         samples = latent["samples"]
         is_av = isinstance(samples, comfy.nested_tensor.NestedTensor)
         if is_av:
@@ -1164,23 +1164,6 @@ class CLSSStage2:
             overlap_lf = s2_overlap
             print(f"[CLSS] auto: s2_overlap={s2_overlap}")
 
-        # Hard guard against a needless chunk boundary (the #1 source of the
-        # ~6s morph): if the WHOLE video fits the token budget, refine it in one
-        # chunk regardless of a manually-set frames_per_chunk.  ComfyUI keeps old
-        # widget values across node-default changes, so a stale fpc (e.g. 31 from
-        # an earlier experiment) would otherwise re-introduce the seam even though
-        # the auto default is 0.  A boundary is only ever created when the video
-        # genuinely does not fit — never as a leftover setting.
-        _guard_budget = 42000
-        if torch.cuda.is_available():
-            _guard_budget = max(24000, int(42000 *
-                (torch.cuda.get_device_properties(0).total_memory / 1024**3) / 15.6))
-        if frames_per_chunk < T and T * H * W <= _guard_budget:
-            print(f"[CLSS] guard: overriding frames_per_chunk={frames_per_chunk}→{T} "
-                  f"— whole video ({T * H * W} tokens) fits budget ({_guard_budget}); "
-                  f"a single chunk avoids the Stage-2 boundary seam/morph.")
-            frames_per_chunk = T
-
         num_chunks = max(1, (T + frames_per_chunk - 1) // frames_per_chunk)
         # Evenly distribute T so no runt last chunk (e.g. avoids [21,21,21,21,9]).
         # Each chunk gets either ceil(T/N) or floor(T/N) frames, differing by at most 1.
@@ -1202,14 +1185,19 @@ class CLSSStage2:
         has_aud = full_aud is not None
         full_noise_aud: torch.Tensor | None = None
         if has_aud:
-            if audio_mode == "refine":
+            if audio_mode in ("refine", "decoupled"):
                 # One coherent audio noise field for all chunks (same rationale as video).
                 _g = torch.Generator(device="cpu").manual_seed(noise_seed + 1)
                 full_noise_aud = torch.randn(full_aud.shape, generator=_g,
                                              dtype=full_aud.dtype)
-                print(f"[CLSS] Stage 2: audio REFINED through distilled schedule "
-                      f"(official ti2vid parity: S1 audio as initial latent, mask=1, "
-                      f"audio SLB tau_c={clss_config.tau_c}).")
+                if audio_mode == "decoupled":
+                    print(f"[CLSS] Stage 2: audio DECOUPLED — video refines against frozen "
+                          f"clean audio (no cross-modal perturbation → no boundary morph); "
+                          f"audio refined in a separate pass against the refined video "
+                          f"(+1 sampler call/chunk).")
+                else:
+                    print(f"[CLSS] Stage 2: audio REFINED jointly with video (couples "
+                          f"modalities; use only as a single chunk).")
             else:
                 print(f"[CLSS] Stage 2: audio frozen (mask=0) — Stage 1 audio passed through unchanged.")
         print(f"[CLSS] Stage 2: CLSS AdaIN/shrinkage corrections DISABLED — "
@@ -1307,18 +1295,33 @@ class CLSSStage2:
             #   The historical mask=0.3 failure was a per-token sigma MISMATCH on
             #   the whole chunk; tau_c on only the overlap region matches how video
             #   SLB has worked all along.
-            # audio_mode="freeze": previous behaviour (mask=0 passthrough) for A/B.
+            # audio_mode="decoupled" (default): the video pass sees FROZEN clean
+            #   Stage-1 audio (mask=0) — byte-identical cross-modal context to the
+            #   behaviour before audio refinement existed, so chunked Stage 2 video
+            #   stays continuous (no boundary morph).  Audio is then refined in a
+            #   SEPARATE pass below, against the just-refined clean video.  This is
+            #   what broke: joint refinement made the video attend to 91%-noise
+            #   audio that differed per chunk, destabilising object identity at the
+            #   seam.  Decoupling gives audio its quality pass without letting it
+            #   perturb the video.
+            # audio_mode="refine": joint single-pass refinement (couples modalities;
+            #   only safe as a single chunk — kept for the frames_per_chunk>=T case).
+            # audio_mode="freeze": Stage-1 audio passed through unchanged (mask=0,
+            #   no audio refinement at all).
             if has_aud:
                 a_new_start = a_pos
                 a_new_end   = min(round(end_pos * T_a / T), T_a)
-                a_ov        = 0 if (is_first or audio_mode == "freeze") else min(a_ov_af, a_new_start)
-                if audio_mode == "freeze":
+                a_ov        = (0 if (is_first or audio_mode in ("freeze", "decoupled"))
+                               else min(a_ov_af, a_new_start))
+                if audio_mode in ("freeze", "decoupled"):
+                    # Video pass: audio frozen at clean Stage-1 latent (mask=0).
                     chunk_af = a_new_end - a_new_start
                     lat_aud  = full_aud[:, :, a_new_start:a_new_end].to(device)
                     mask_aud = torch.zeros(B_a, C_a, chunk_af, freq, device=device)
                     print(f"[CLSS S2]   {_astats(lat_aud, f's1_aud[{a_new_start}:{a_new_end}]')}")
                     print(f"[CLSS S2]   aud_in: af=[{a_new_start}:{a_new_end}] chunk_af={chunk_af} "
-                          f"acc_a_pos={a_pos}  mask=0 (frozen passthrough)")
+                          f"acc_a_pos={a_pos}  mask=0 "
+                          f"({'frozen' if audio_mode == 'freeze' else 'video-pass; audio refined separately'})")
                 else:
                     chunk_af = a_ov + (a_new_end - a_new_start)
                     lat_aud  = torch.zeros(B_a, C_a, chunk_af, freq, device=device)
@@ -1365,6 +1368,43 @@ class CLSSStage2:
                 vid_out  = d_samples
                 aud_out  = None
 
+            # ── Decoupled audio: SECOND pass, audio-only, against refined video ──
+            # The first pass above refined VIDEO with audio frozen (mask=0), so the
+            # video is identical to the no-audio-refinement path.  Now refine audio
+            # against that refined video, with the video frozen (mask=0) this time —
+            # so audio gets its quality pass and re-aligns to the refined video, but
+            # cannot perturb it.  Cost: +1 sampler call per chunk (audio tokens only
+            # denoise; video is frozen).
+            if has_aud and audio_mode == "decoupled":
+                a_ov2 = 0 if is_first else min(a_ov_af, a_new_start)
+                chunk_af2 = a_ov2 + (a_new_end - a_new_start)
+                lat_aud2  = torch.zeros(B_a, C_a, chunk_af2, freq, device=device)
+                mask_aud2 = torch.ones(B_a, C_a, chunk_af2, freq, device=device)
+                lat_aud2[:, :, a_ov2:] = full_aud[:, :, a_new_start:a_new_end].to(device)
+                if a_ov2 > 0 and s2_audio_overlap is not None:
+                    slb_n2 = min(a_ov2, s2_audio_overlap.shape[2])
+                    lat_aud2[:, :, a_ov2 - slb_n2:a_ov2]  = s2_audio_overlap[:, :, -slb_n2:].to(device)
+                    mask_aud2[:, :, a_ov2 - slb_n2:a_ov2] = clss_config.tau_c
+                # Video side: refined video, FROZEN (mask=0) — audio attends to clean
+                # refined video but the video pass here is a no-op for video content.
+                vid_ctx = vid_out.detach()
+                mask_vid2 = torch.zeros(B, 1, vid_ctx.shape[2], 1, 1, device=device)
+                # Audio noise must align with lat_aud2's overlap layout for this pass.
+                chunk_noise2 = _SlicedNoise(full_noise_vid, pos, chunk_overlap, seed=noise_seed + 7,
+                                            full_noise_aud=full_noise_aud,
+                                            a_pos=a_pos, a_overlap=a_ov2)
+                chunk_latent2 = {
+                    "samples":    comfy.nested_tensor.NestedTensor((vid_ctx, lat_aud2)),
+                    "noise_mask": comfy.nested_tensor.NestedTensor((mask_vid2, mask_aud2)),
+                }
+                print(f"[CLSS S2]   audio 2nd pass (decoupled): chunk_af={chunk_af2} "
+                      f"(slb={a_ov2}f tau_c + new={a_new_end - a_new_start}f)  video frozen")
+                _, denoised2 = SamplerCustomAdvanced().sample(
+                    noise=chunk_noise2, guider=active_guider, sampler=sampler,
+                    sigmas=sigmas, latent_image=chunk_latent2,
+                )
+                _, aud_out = denoised2["samples"].unbind()
+
             new_vid = vid_out[:, :, chunk_overlap:]
             n_slb   = min(overlap_lf, actual_new)
             overlap_latent = new_vid[:, :, -n_slb:].clone().cpu()
@@ -1407,21 +1447,26 @@ class CLSSStage2:
             print()
 
             if aud_out is not None:
-                # Drop the audio SLB region (refine mode; a_ov=0 in freeze/first chunk)
-                new_aud = aud_out[:, :, a_ov:]
+                # Effective audio overlap for this chunk's aud_out:
+                #   freeze/refine → a_ov (from the joint pass)
+                #   decoupled     → a_ov2 (from the separate audio pass)
+                _eff_ov = a_ov2 if audio_mode == "decoupled" else a_ov
+                _is_refined = audio_mode in ("refine", "decoupled")
+                # Drop the audio SLB region (0 in freeze/first chunk)
+                new_aud = aud_out[:, :, _eff_ov:]
                 s1_chunk_ref = full_aud[:, :, a_new_start:a_new_end].to(device)
                 _s1_sim = _aud_cos(s1_chunk_ref, new_aud)
-                if audio_mode == "freeze":
+                if not _is_refined:
                     print(f"[CLSS S2]   {_astats(new_aud, 'aud_out(frozen)')}"
                           f"  frozen_verify_sim={_s1_sim:.4f}")
                 else:
-                    # refine: sim vs S1 measures how much the distilled pass changed
-                    # the audio.  ~0.6-0.9 expected (real refinement); ~1.0 means the
-                    # renoise did nothing; ~0 means S1 seeding isn't reaching the model.
-                    # Chunk-1 onset treatment (mirrors Stage 1): refined chunk-1 audio
-                    # regenerates from near-scratch at sigma_0 and shows the same t≈0
-                    # transient (observed min=-6.7 vs ±3 elsewhere).  Fade-in + per-
-                    # channel soft-clamp before the tail is saved or accumulated.
+                    # refine/decoupled: sim vs S1 measures how much the distilled pass
+                    # changed the audio.  ~0.6-0.9 expected (real refinement); ~1.0
+                    # means the renoise did nothing; ~0 means S1 seeding isn't reaching
+                    # the model.  Chunk-1 onset treatment (mirrors Stage 1): refined
+                    # chunk-1 audio regenerates from near-scratch at σ0 and shows the
+                    # same t≈0 transient.  Fade-in + per-channel soft-clamp before the
+                    # tail is saved or accumulated.
                     if is_first:
                         _n_fade = min(4, new_aud.shape[2])
                         for _i in range(_n_fade):
@@ -1435,10 +1480,10 @@ class CLSSStage2:
                               f"new_abs_max={new_aud.float().abs().max():.4f}")
                     print(f"[CLSS S2]   {_astats(new_aud, 'aud_out(refined)')}"
                           f"  s1_seed_sim={_s1_sim:.4f}")
-                    if a_ov > 0 and s2_audio_overlap is not None:
-                        _slb_n  = min(a_ov, s2_audio_overlap.shape[2])
+                    if _eff_ov > 0 and s2_audio_overlap is not None:
+                        _slb_n  = min(_eff_ov, s2_audio_overlap.shape[2])
                         _slb_ok = _aud_cos(s2_audio_overlap[:, :, -_slb_n:].to(device),
-                                           aud_out[:, :, a_ov - _slb_n:a_ov])
+                                           aud_out[:, :, _eff_ov - _slb_n:_eff_ov])
                         print(f"[CLSS S2]   audio SLB honored: {_slb_ok:.4f} (expect ≥0.97)")
                     # Save refined tail as next chunk's audio SLB
                     _tail_n = min(a_ov_af, new_aud.shape[2])
@@ -1465,7 +1510,7 @@ class CLSSStage2:
         print(f"[CLSS S2] {_astats(full_refined_vid, 'full_refined_vid')}")
         if acc_audio:
             full_refined_aud = torch.cat(acc_audio, dim=2)
-            if audio_mode == "refine":
+            if audio_mode in ("refine", "decoupled"):
                 # Independently-refined chunks → smooth boundaries (energy already
                 # matched via S1 seeding + shared noise field; smoothing only).
                 full_refined_aud = _post_process_audio_latent(
