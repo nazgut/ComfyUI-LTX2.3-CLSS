@@ -523,6 +523,18 @@ class CLSSStreamingSampler:
         # Tracking state for per-chunk coherence metrics (§items 1,2,6)
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
         _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
+        # Per-chunk trend accumulators → compact end-of-run summary so drift is
+        # readable at a glance instead of scraping N chunks by hand.
+        _trend = {
+            "vid_std":   [],  # post-correction video global std (creep check)
+            "vid_ident": [],  # identity_sim vs nearest anchor (content drift)
+            "vid_bnd":   [],  # video boundary_sim (chunk seam)
+            "aud_rms":   [],  # audio RMS AFTER anchor (energy stability)
+            "aud_bnd":   [],  # audio boundary_sim (content seam)
+            "aud_slb":   [],  # audio SLB honored (continuity mechanism health)
+            "aud_wc":    [],  # audio within-chunk END sim (intra-chunk audio drift)
+            "aud_hf":    [],  # audio high-freq energy ratio (spectral drift)
+        }
         _s1_aud_prev_last:   torch.Tensor | None = None  # [B, C_a, 1, freq] last audio frame
         _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean (diagnostics)
         _s1_audio_ref_std:   torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) std (diagnostics)
@@ -745,8 +757,10 @@ class CLSSStreamingSampler:
             if _s1_prev_last is not None:
                 _bnd = _frame_cos(_s1_prev_last.to(device), corrected[:, :, 0])
                 print(f"[CLSS S1]   boundary_sim={_bnd:.4f}  intra_chunk_sim={_intra:.4f}")
+                _trend["vid_bnd"].append(_bnd)
             else:
                 print(f"[CLSS S1]   boundary_sim=N/A(first)  intra_chunk_sim={_intra:.4f}")
+            _trend["vid_std"].append(std_post)
             # §item-6: identity-retention — cosine vs nearest bank anchor.
             # Comparing vs the NEAREST anchor (not always chunk-1) separates within-scene
             # identity from intended scene changes: if the bank grew, the nearest anchor
@@ -774,6 +788,7 @@ class CLSSStreamingSampler:
                     _best_fid = _bank.anchors[_best_idx].frame_idx
                     _note = "(bank=1, equiv chunk-1)" if len(_bank.anchors) == 1 else f"(bank_size={len(_bank.anchors)})"
                     print(f"[CLSS S1]   identity_sim={_best_sim:.4f} {_note} vs anchor@frame{_best_fid}")
+                    _trend["vid_ident"].append(_best_sim)
                 else:
                     print(f"[CLSS S1]   identity_sim=N/A (bank empty)")
             _s1_prev_last = corrected[:, :, -1].cpu()
@@ -809,6 +824,7 @@ class CLSSStreamingSampler:
                     _slb_sim = _aud_cos(audio_slb_latent.to(device),
                                         aud_out[:, :, :audio_overlap_af])
                     print(f"[CLSS S1]   audio SLB honored: {_slb_sim:.4f} (expect ≥0.97)")
+                    _trend["aud_slb"].append(_slb_sim)
                 # Per-channel max-abs for first 8 frames (diagnose onset spike in chunk 1)
                 with torch.no_grad():
                     _n8 = min(8, new_aud.shape[2])
@@ -839,10 +855,12 @@ class CLSSStreamingSampler:
                 if _aud_sims:
                     print(f"[CLSS S1]   audio_within_chunk_sim: "
                           + " → ".join(f"{s:.3f}" for s in _aud_sims))
+                    _trend["aud_wc"].append(_aud_sims[-1])
                 # audio boundary_sim — chunk-to-chunk continuity at the sample level
                 if _s1_aud_prev_last is not None:
                     _aud_bnd = _aud_cos(_s1_aud_prev_last.to(device), new_aud[:, :, :1])
                     print(f"[CLSS S1]   audio_boundary_sim={_aud_bnd:.4f}")
+                    _trend["aud_bnd"].append(_aud_bnd)
                 else:
                     print(f"[CLSS S1]   audio_boundary_sim=N/A(first)")
                 # RMS envelope — raw RMS + per-segment breakdown + peak location
@@ -872,6 +890,9 @@ class CLSSStreamingSampler:
                         f"[CLSS S1]   audio freq_energy=[{' '.join(f'{e:.3f}' for e in _freq_e)}]"
                         f"  ratio=[{' '.join(f'{r:.2f}' for r in _freq_ratio)}]"
                     )
+                    # high-freq drift = mean ratio of the top 4 freq bins (spectral flattening)
+                    if len(_freq_ratio) >= 4:
+                        _trend["aud_hf"].append(sum(_freq_ratio[-4:]) / 4.0)
                 # Scalar upward-only RMS gain — exact port of the reference pipeline
                 # (pipeline.py:741-757).  One global gain per chunk, applied ONLY when
                 # the chunk is quieter than chunk-0 ("don't attenuate genuinely louder
@@ -922,6 +943,15 @@ class CLSSStreamingSampler:
                     print(f"[CLSS S1]   audio anchor→chunk0: rms {_aud_rms:.4f}→"
                           f"{new_aud.float().pow(2).mean().sqrt().item():.4f} (g={_g.item():.4f})  "
                           f"DC removed/ch=[{' '.join(f'{v:+.3f}' for v in _dc_removed)}]")
+                # Trend: RMS and boundary measured on the FINAL kept audio (post-anchor,
+                # post-onset-fix) — this is what actually reaches the SLB/output, so it
+                # is the honest stability signal.  The boundary print above is pre-anchor;
+                # this one tells us whether the SLB is truly carrying continuity forward.
+                _trend["aud_rms"].append(new_aud.float().pow(2).mean().sqrt().item())
+                if _s1_aud_prev_last is not None:
+                    _bnd_final = _aud_cos(_s1_aud_prev_last.to(device), new_aud[:, :, :1])
+                    if abs(_bnd_final - (_trend["aud_bnd"][-1] if _trend["aud_bnd"] else _bnd_final)) > 0.02:
+                        print(f"[CLSS S1]   audio_boundary_sim(post-anchor)={_bnd_final:.4f}")
                 if audio_overlap_af > 0:
                     ov = audio_overlap_af
                     # Audio SLB for next chunk: last ov frames of new_aud = the temporal
@@ -983,6 +1013,39 @@ class CLSSStreamingSampler:
             output_samples = comfy.nested_tensor.NestedTensor((full_vid, full_aud))
         else:
             output_samples = full_vid
+
+        # ── End-of-run Stage 1 trend summary ────────────────────────────────
+        # One block that says WHERE we failed, without scraping N chunks by hand.
+        # Each line: first→last value, drift %, and a heuristic PASS/WARN verdict.
+        def _trend_line(name, vals, want, tol, hi_good=True):
+            if not vals:
+                return f"    {name:14s}: (no data)"
+            v0, vN = vals[0], vals[-1]
+            drift = (vN - v0)
+            mn, mx = min(vals), max(vals)
+            # verdict: for "hi_good" metrics warn if any value falls below want-tol;
+            # for stability metrics (want=None) warn if range exceeds tol.
+            if want is None:
+                bad = (mx - mn) > tol
+                tag = "WARN drift" if bad else "ok"
+                extra = f"range={mx - mn:+.3f}"
+            else:
+                bad = (mn < want - tol) if hi_good else (mx > want + tol)
+                tag = "WARN" if bad else "ok"
+                extra = f"min={mn:.3f}"
+            return (f"    {name:14s}: {v0:.3f}→{vN:.3f} (Δ{drift:+.3f}) {extra:14s} [{tag}]")
+
+        print("[CLSS] ═══ Stage 1 trend summary (first→last / drift / verdict) ═══")
+        print(_trend_line("vid_std",   _trend["vid_std"],   want=None, tol=0.04))          # creep
+        print(_trend_line("vid_ident",  _trend["vid_ident"], want=0.85, tol=0.0))           # content drift
+        print(_trend_line("vid_bnd",    _trend["vid_bnd"],   want=0.95, tol=0.0))           # seam
+        print(_trend_line("aud_rms",    _trend["aud_rms"],   want=None, tol=0.10))          # energy stability
+        print(_trend_line("aud_bnd",    _trend["aud_bnd"],   want=0.80, tol=0.0))           # audio seam
+        print(_trend_line("aud_slb",    _trend["aud_slb"],   want=0.97, tol=0.0))           # continuity mech
+        print(_trend_line("aud_wc",     _trend["aud_wc"],    want=0.80, tol=0.0))           # intra-chunk audio
+        print(_trend_line("aud_hf",     _trend["aud_hf"],    want=None, tol=0.50))          # spectral drift
+        print("[CLSS]   verdicts: vid_std/aud_rms/aud_hf check STABILITY (range); "
+              "others check a floor. WARN = the likely failure locus.")
 
         # Output is on CPU — unload models and flush CUDA allocator so the upscale
         # model loads into as much VRAM as possible instead of offloading to CPU.
@@ -1248,6 +1311,7 @@ class CLSSStage2:
         _s2_prev_last:     torch.Tensor | None = None  # [B, C_v, H, W] last new frame of prev S2 chunk
         _s2_id_ref:        torch.Tensor | None = None  # [B, C_v] identity ref from S2 chunk-1
         _s2_aud_prev_last: torch.Tensor | None = None  # [B, C_a, 1, freq] last new audio frame of prev S2 chunk
+        _s2_trend = {"fid_first": [], "fid_last": [], "aud_bnd": []}
 
         def _astats(t: torch.Tensor, label: str) -> str:
             t = t.float()
@@ -1476,6 +1540,10 @@ class CLSSStage2:
             for _fi, _lbl in [(0, "first"), (actual_new // 2, "mid"), (actual_new - 1, "last")]:
                 _fid = _frame_cos(new_vid[:, :, _fi], _s1_slice[:, :, _fi])
                 print(f"[CLSS S2]   S1_fidelity[{_lbl}]={_fid:.4f}", end="  ")
+                if _lbl == "last":
+                    _s2_trend["fid_last"].append(_fid)
+                if _lbl == "first":
+                    _s2_trend["fid_first"].append(_fid)
             print()
 
             if aud_out is not None:
@@ -1524,6 +1592,7 @@ class CLSSStage2:
                 if _s2_aud_prev_last is not None:
                     _aud_bnd = _aud_cos(_s2_aud_prev_last.to(device), new_aud[:, :, :1])
                     print(f"[CLSS S2]   audio_boundary_sim={_aud_bnd:.4f}")
+                    _s2_trend["aud_bnd"].append(_aud_bnd)
                 else:
                     print(f"[CLSS S2]   audio_boundary_sim=N/A(first)")
                 _s2_aud_prev_last = new_aud[:, :, -1:].cpu()
@@ -1560,6 +1629,25 @@ class CLSSStage2:
             output = comfy.nested_tensor.NestedTensor((full_refined_vid, full_aud.cpu()))
         else:
             output = full_refined_vid
+
+        # ── End-of-run Stage 2 trend summary ────────────────────────────────
+        def _s2line(name, vals, want, tol, stability=False):
+            if not vals:
+                return f"    {name:16s}: (no data)"
+            v0, vN, mn, mx = vals[0], vals[-1], min(vals), max(vals)
+            if stability:
+                bad = (mx - mn) > tol; tag = "WARN drift" if bad else "ok"
+                return f"    {name:16s}: {v0:.3f}→{vN:.3f} (range={mx - mn:+.3f}) [{tag}]"
+            bad = mn < want - tol; tag = "WARN" if bad else "ok"
+            return f"    {name:16s}: {v0:.3f}→{vN:.3f} (min={mn:.3f}) [{tag}]"
+
+        if _s2_trend["fid_last"] or _s2_trend["aud_bnd"]:
+            print("[CLSS] ═══ Stage 2 trend summary ═══")
+            print(_s2line("fid_first",  _s2_trend["fid_first"], want=0.95, tol=0.0))
+            print(_s2line("fid_last",   _s2_trend["fid_last"],  want=0.95, tol=0.02))   # end-fade signal
+            print(_s2line("aud_bnd",    _s2_trend["aud_bnd"],   want=0.80, tol=0.0))    # S2 audio seams
+            print("[CLSS]   fid_last dropping across chunks = video softening toward the end; "
+                  "aud_bnd low = S2 audio re-seams each chunk.")
 
         return ({"samples": output},)
 
