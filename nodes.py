@@ -555,6 +555,7 @@ class CLSSStreamingSampler:
         # Tracking state for per-chunk coherence metrics (§items 1,2,6)
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
         _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
+        _prev_scene_idx:     int | None = None            # scene of the previous chunk (stat-anchor re-baseline)
         # Per-chunk trend accumulators → compact end-of-run summary so drift is
         # readable at a glance instead of scraping N chunks by hand.
         _trend = {
@@ -605,6 +606,33 @@ class CLSSStreamingSampler:
             scene_idx = 0
             if num_scenes > 1:
                 scene_idx = min(int(chunk_idx * num_scenes / num_chunks), num_scenes - 1)
+
+            # Scene change → re-baseline the STATISTICS anchors.  These anchors
+            # (video global-std, audio RMS/DC EMA) exist to stop autoregressive
+            # drift WITHIN a scene; they are scene-blind by construction and, on
+            # the first multi-scene run, measurably fought intended scene changes:
+            # the std anchor amplified scene-2 by +3.6% and scene-3 by +7.4%
+            # toward scene-1's contrast (log: g=1.0358, g=1.0741), and the audio
+            # EMA forced scenes that legitimately run at RMS ~1.01-1.05 down
+            # toward scene-1's 0.82, pinned at its ±5% cap the whole run.
+            # Setting the refs to None makes the first chunk of each scene the
+            # new baseline (its own init path re-fires), exactly as chunk 0 did
+            # for scene 1.  Single-scene runs: no scene change ever fires, so
+            # behaviour is byte-identical.  The CONTENT continuity mechanisms
+            # (SLB, ref_audio, anchor bank) are untouched — the bank already has
+            # its own scene-change handling (scene_change_streak).
+            if chunk_idx > 0 and scene_idx != _prev_scene_idx:
+                _s1_vid_std_ref    = None
+                _s1_audio_rms_ref  = None
+                _s1_audio_ref_mean = None
+                _s1_audio_ref_std  = None
+                _s1_audio_ema_rms  = None
+                _s1_audio_ema_dc   = None
+                print(f"[CLSS S1]   scene {(_prev_scene_idx or 0) + 1}→{scene_idx + 1}: "
+                      f"statistics anchors re-baselined (video std, audio RMS/DC now "
+                      f"anchor to this scene's first chunk; content continuity "
+                      f"mechanisms unchanged)")
+            _prev_scene_idx = scene_idx
 
             has_slb     = not is_first and clss_state._overlap_latent is not None
             has_aud_slb = not is_first and audio_slb_latent is not None
