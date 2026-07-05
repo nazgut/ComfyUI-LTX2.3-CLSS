@@ -291,6 +291,38 @@ class CLSSScenePrompts:
 # Node 3: CLSSStreamingSampler
 # ---------------------------------------------------------------------------
 
+def _tau_c_eff(base: float, ceiling: float, chunk_idx: int, half_life: float = 5.0) -> float:
+    """Effective overlap re-noising level for chunk `chunk_idx` (0-indexed among
+    chunks that HAVE an overlap, i.e. chunk_idx=0 is the second physical chunk).
+
+    Diagnosis (confirmed against measured logs, not assumed): stacking every
+    continuity mechanism we've built -- SLB at fixed tau_c, ref_audio at full
+    strength forever, and a hard energy anchor to a single fixed point -- switches
+    on as a THRESHOLD, not a gradual drift.  Video intra_chunk_sim jumped from
+    0.83 to 0.96 the instant full-strength SLB+ref turned on (chunk 3); audio
+    within-chunk sim collapsed from ~0.85 to ~0.49 the instant ref_audio reached
+    its full 67-frame window.  Once full-strength continuity conditioning is
+    locked in, self-attention lets the frozen/anchored region "leak" into the
+    whole chunk, and the model stops advancing content -- it re-renders a
+    stabilised loop.  Repetition, not degradation.
+
+    Fix: let tau_c (freedom) relax from its strong starting value toward a
+    CAPPED ceiling as conditioning-chunks accumulate -- exactly the LTX IC-LoRA
+    pattern of an adjustable attention_strength on conditioning tokens, applied
+    here as a decay-with-floor schedule.  Never fully open (that reintroduces
+    the original open-loop drift problem CLSS exists to prevent) -- "auto
+    slowing down but don't disappear."  Video keeps a conservative ceiling
+    (tau_c=0.05 was hard-won against boundary morphing); audio can afford more
+    room since it has the EMA energy anchor as an independent stability backstop.
+    """
+    decay = 0.5 ** (chunk_idx / half_life)
+    return ceiling - (ceiling - base) * decay
+
+
+_VIDEO_TAU_C_CEILING = 0.10   # conservative: half the empirically-unstable 0.20
+_AUDIO_TAU_C_CEILING = 0.15   # audio has the EMA anchor as a backstop
+
+
 class CLSSStreamingSampler:
     """CLSS streaming sampler — compatible with LTXVConcatAVLatent output.
 
@@ -528,6 +560,7 @@ class CLSSStreamingSampler:
         _trend = {
             "vid_std":   [],  # post-correction video global std (creep check)
             "vid_ident": [],  # identity_sim vs nearest anchor (content drift)
+            "vid_intra": [],  # intra-chunk sim — repetition signal (0.73 healthy, 0.97+ = looping)
             "vid_bnd":   [],  # video boundary_sim (chunk seam)
             "aud_rms":   [],  # audio RMS AFTER anchor (energy stability)
             "aud_bnd":   [],  # audio boundary_sim (content seam)
@@ -536,8 +569,10 @@ class CLSSStreamingSampler:
             "aud_hf":    [],  # audio high-freq energy ratio (spectral drift)
         }
         _s1_aud_prev_last:   torch.Tensor | None = None  # [B, C_a, 1, freq] last audio frame
-        _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean (diagnostics)
+        _s1_audio_ref_mean:  torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) mean (fixed origin, for drift cap)
         _s1_audio_ref_std:   torch.Tensor | None = None  # [B_a, C_a, 1, freq] chunk-0 per-(ch×bin) std (diagnostics)
+        _s1_audio_ema_rms:   float | None = None          # slow-drifting RMS anchor target (capped vs origin)
+        _s1_audio_ema_dc:    torch.Tensor | None = None   # slow-drifting per-channel DC anchor target (capped vs origin)
         _s1_audio_rms_ref:   float | None = None         # chunk-0 scalar RMS (onset-excluded) — correction target
         _s1_audio_freq_ref:  list[float]  | None = None  # chunk-0 per-bin energy reference
         # Rolling audio tail (reference pipeline.py:771-806): last 2×overlap frames of
@@ -593,14 +628,19 @@ class CLSSStreamingSampler:
             lat_vid = torch.zeros(B, C_v, total_lf, H, W, device=device)
             mask_vid = torch.ones(B, 1, total_lf, 1, 1, device=device)
 
-            # §2.1 Place SLB at overlap frames with noise_mask = tau_c
+            # §2.1 Place SLB at overlap frames with noise_mask = tau_c_eff (decaying
+            # strength schedule -- see _tau_c_eff docstring).  chunk_idx-1 because the
+            # schedule counts chunks THAT HAVE an overlap (first chunk has none).
             if has_slb:
+                _tau_c_v = _tau_c_eff(clss_config.tau_c, _VIDEO_TAU_C_CEILING, chunk_idx - 1)
                 lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
                     lat_vid, mask_vid,
                     guiding_latent=clss_state._overlap_latent.to(device),
                     latent_idx=0,
-                    strength=1.0 - clss_config.tau_c,
+                    strength=1.0 - _tau_c_v,
                 )
+                print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
+                      f"ceiling={_VIDEO_TAU_C_CEILING})")
 
             # i2v: in-place first-frame conditioning — the canonical LTX i2v path.
             # ComfyUI's LTXVAddGuide itself uses replace_latent_frames for frame_idx=0;
@@ -641,9 +681,11 @@ class CLSSStreamingSampler:
                 if has_aud_slb and audio_slb == "on":
                     slb = audio_slb_latent.to(device)
                     n   = min(audio_overlap_af, slb.shape[2], chunk_af)
+                    _tau_c_a = _tau_c_eff(clss_config.tau_c, _AUDIO_TAU_C_CEILING, chunk_idx - 1)
                     lat_aud[:, :, :n]  = slb[:, :, :n]
-                    mask_aud[:, :, :n] = clss_config.tau_c
-                    print(f"[CLSS S1]   audio SLB: {n}f  tau_c={clss_config.tau_c}  "
+                    mask_aud[:, :, :n] = _tau_c_a
+                    print(f"[CLSS S1]   audio SLB: {n}f  tau_c_eff={_tau_c_a:.4f} "
+                          f"(base={clss_config.tau_c}, ceiling={_AUDIO_TAU_C_CEILING})  "
                           f"mean={slb[:, :, :n].float().mean():.4f}")
                 elif has_aud_slb:
                     print(f"[CLSS S1]   audio SLB: OFF (reference design — overlap audio "
@@ -653,6 +695,22 @@ class CLSSStreamingSampler:
                 # preceded this chunk (av_model.py line 708 prepends ref tokens).
                 if has_aud_ref:
                     ref_slb   = audio_overlap_latent.to(device)   # [B, C, T_ov, freq]
+                    # Progressive, CAPPED noise blend (mirrors LTX's own IC-LoRA
+                    # attention_strength pattern -- an adjustable scalar on how hard a
+                    # conditioning signal pulls generation, here realised as blending
+                    # noise into the reference itself rather than scaling attention).
+                    # ref_audio was injected at full, undecaying strength every chunk;
+                    # confirmed on measured logs that audio within-chunk similarity
+                    # collapses (~0.85→~0.49) the exact chunk its window reaches full
+                    # size — a forcing function, not gentle guidance.  Blend fraction
+                    # grows with chunk index but is CAPPED well under 1.0 so the
+                    # reference never disappears (identity beacon persists; "auto
+                    # slowing down but don't disappear").
+                    _ref_noise_frac = min(0.35, 0.05 * max(0, chunk_idx - 1))
+                    if _ref_noise_frac > 0.0:
+                        _rn = torch.randn_like(ref_slb) * ref_slb.float().std()
+                        ref_slb = (ref_slb.float() * (1 - _ref_noise_frac)
+                                   + _rn * _ref_noise_frac).to(ref_slb.dtype)
                     b_r, c_r, t_r, f_r = ref_slb.shape
                     ref_tokens = ref_slb.permute(0, 2, 1, 3).reshape(b_r, t_r, c_r * f_r)
                     ref_audio_dict = {"tokens": ref_tokens}
@@ -671,6 +729,7 @@ class CLSSStreamingSampler:
                     print(f"[CLSS S1]   audio ref_audio injected: {t_r} tokens "
                           f"mean={ref_slb.float().mean():.4f} "
                           f"std={ref_slb.float().std():.4f} "
+                          f"noise_frac={_ref_noise_frac:.3f} "
                           f"nan={ref_slb.isnan().any().item()} "
                           f"inf={ref_slb.isinf().any().item()}")
                 else:
@@ -753,6 +812,7 @@ class CLSSStreamingSampler:
 
             # §item-1: intra-chunk cosine — first vs last new frame (corrected latent)
             _intra = _frame_cos(corrected[:, :, 0], corrected[:, :, -1])
+            _trend["vid_intra"].append(_intra)
             # §item-2: boundary cosine — last frame of previous chunk vs first new frame
             if _s1_prev_last is not None:
                 _bnd = _frame_cos(_s1_prev_last.to(device), corrected[:, :, 0])
@@ -910,38 +970,59 @@ class CLSSStreamingSampler:
                     _skip = min(16, new_aud.shape[2])
                     _ref_aud = new_aud[:, :, _skip:] if new_aud.shape[2] > _skip else new_aud
                     _s1_audio_rms_ref  = _ref_aud.float().pow(2).mean().sqrt().item()
-                    # Per-channel DC reference (onset-excluded) — the anchor the loop
-                    # must be pulled back to every chunk, not just logged against.
+                    # Per-channel DC reference (onset-excluded) — the FIXED origin used
+                    # only to cap how far the EMA target may drift (never the target
+                    # itself — see else-branch).
                     _s1_audio_ref_mean = _ref_aud.float().mean(dim=2, keepdim=True).cpu()
                     _s1_audio_ref_std  = _ref_aud.float().std(dim=2, keepdim=True).clamp(min=1e-6).cpu()
+                    _s1_audio_ema_rms  = _s1_audio_rms_ref
+                    _s1_audio_ema_dc   = _s1_audio_ref_mean.clone()
                     print(f"[CLSS S1]   audio rms_ref={_s1_audio_rms_ref:.4f} (onset-excluded)")
                 else:
-                    # HARD anchor to chunk-0, applied BEFORE new_aud feeds the SLB /
-                    # ref_audio / tail.  The 15-chunk run proved the audio path is a
-                    # DIVERGENT autoregressive loop: each chunk's drifted output (RMS
-                    # and DC) becomes the next chunk's ref_audio, the model continues
-                    # the trend, and RMS quadrupled (0.6→2.66) with DC marching to
-                    # −3.5 and high-freq to 12× reference.  A soft β-blended, clamped
-                    # gain (old behaviour) pinned at its 0.87 floor while raw wanted
-                    # 0.23 — it damped the OUTPUT but left the fed-forward context
-                    # drifted, so the loop kept its fuel.
-                    #   Fix: (1) remove per-channel DC drift entirely (subtract the
-                    #   chunk's mean, restore chunk-0's mean), and (2) match global RMS
-                    #   to chunk-0 exactly.  Both are lossless w.r.t. audio CONTENT
-                    #   (shift + scale) but reset the two quantities that compound.
-                    #   This is open-loop generation with a fixed anchor — the correct
-                    #   regime for autoregressive stability — not the reference's
-                    #   single-pass upward-only nudge.
+                    # EMA anchor with capped drift — mirrors the pattern already proven
+                    # for video style (ema_lambda / ema_sigma_max_drift), applied here to
+                    # audio energy instead of a HARD fixed-forever target.
+                    #
+                    # The 15-chunk run proved the RAW (uncorrected) audio path is a
+                    # DIVERGENT autoregressive loop: RMS quadrupled, DC marched to −3.5.
+                    # A fixed-forever target (previous fix) stopped the divergence but
+                    # ties every chunk to one fixed instant for the ENTIRE run — combined
+                    # with the also-strong SLB/ref conditioning, this was confirmed (via
+                    # the per-chunk trend log) to cause repetition: within-chunk audio
+                    # similarity collapsed the moment full-strength conditioning kicked
+                    # in, meaning the model stopped advancing content and re-rendered a
+                    # stabilised loop.
+                    #
+                    # Fix: let the TARGET slowly track the content's own natural
+                    # trajectory (EMA of the raw, pre-correction chunk), capped so it can
+                    # never wander more than sigma_max_drift from the true chunk-0 origin
+                    # — bounded room for the audio's character to evolve over a long
+                    # video, without reopening the divergent-loop failure mode.
+                    _lam  = clss_config.ema_lambda
+                    _drift = clss_config.ema_sigma_max_drift
+                    _rms0 = _s1_audio_rms_ref
                     with torch.no_grad():
-                        _ref_m = _s1_audio_ref_mean.to(device)                 # [B,C,1,freq]
-                        _cur_m = new_aud.float().mean(dim=2, keepdim=True)
-                        _tmp   = new_aud.float() - _cur_m + _ref_m             # DC → chunk-0
+                        _cur_m = new_aud.float().mean(dim=2, keepdim=True)   # raw, pre-correction
+                        # RMS EMA, capped to [rms0*(1-drift), rms0*(1+drift)]
+                        _ema_rms_raw = (1 - _lam) * _s1_audio_ema_rms + _lam * _aud_rms
+                        _s1_audio_ema_rms = min(max(_ema_rms_raw, _rms0 * (1 - _drift)),
+                                                 _rms0 * (1 + _drift))
+                        # DC EMA, capped to origin ± (drift × rms0) per (channel×bin) —
+                        # rms0 is the natural amplitude scale for "how big a DC shift matters".
+                        _dc0 = _s1_audio_ref_mean.to(device)
+                        _ema_dc_raw = (1 - _lam) * _s1_audio_ema_dc.to(device) + _lam * _cur_m
+                        _delta = (_ema_dc_raw - _dc0).clamp(min=-_drift * _rms0, max=_drift * _rms0)
+                        _s1_audio_ema_dc = (_dc0 + _delta).cpu()
+
+                        _ref_m = _s1_audio_ema_dc.to(device)                   # slow-drifting target
+                        _tmp   = new_aud.float() - _cur_m + _ref_m             # DC → EMA target
                         _rms_t = _tmp.pow(2).mean().sqrt().clamp(min=1e-6)
-                        _g     = _s1_audio_rms_ref / _rms_t
+                        _g     = _s1_audio_ema_rms / _rms_t
                     new_aud = (_tmp * _g).to(aud_out.dtype)
                     _dc_removed = (_cur_m - _ref_m).mean(dim=-1).squeeze().tolist()
-                    print(f"[CLSS S1]   audio anchor→chunk0: rms {_aud_rms:.4f}→"
-                          f"{new_aud.float().pow(2).mean().sqrt().item():.4f} (g={_g.item():.4f})  "
+                    print(f"[CLSS S1]   audio anchor→EMA(drift-capped ±{_drift:.0%}): "
+                          f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f} "
+                          f"(g={_g.item():.4f}, ema_rms={_s1_audio_ema_rms:.4f}, rms0={_rms0:.4f})  "
                           f"DC removed/ch=[{' '.join(f'{v:+.3f}' for v in _dc_removed)}]")
                 # Trend: RMS and boundary measured on the FINAL kept audio (post-anchor,
                 # post-onset-fix) — this is what actually reaches the SLB/output, so it
@@ -1032,12 +1113,13 @@ class CLSSStreamingSampler:
             else:
                 bad = (mn < want - tol) if hi_good else (mx > want + tol)
                 tag = "WARN" if bad else "ok"
-                extra = f"min={mn:.3f}"
+                extra = f"min={mn:.3f}" if hi_good else f"max={mx:.3f}"
             return (f"    {name:14s}: {v0:.3f}→{vN:.3f} (Δ{drift:+.3f}) {extra:14s} [{tag}]")
 
         print("[CLSS] ═══ Stage 1 trend summary (first→last / drift / verdict) ═══")
         print(_trend_line("vid_std",   _trend["vid_std"],   want=None, tol=0.04))          # creep
         print(_trend_line("vid_ident",  _trend["vid_ident"], want=0.85, tol=0.0))           # content drift
+        print(_trend_line("vid_intra", _trend["vid_intra"], want=0.90, tol=0.0, hi_good=False))  # repetition (ceiling, not floor)
         print(_trend_line("vid_bnd",    _trend["vid_bnd"],   want=0.95, tol=0.0))           # seam
         print(_trend_line("aud_rms",    _trend["aud_rms"],   want=None, tol=0.10))          # energy stability
         print(_trend_line("aud_bnd",    _trend["aud_bnd"],   want=0.80, tol=0.0))           # audio seam
