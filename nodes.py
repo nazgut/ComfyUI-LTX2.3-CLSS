@@ -597,6 +597,16 @@ class CLSSStreamingSampler:
             f"seed={_noise_seed_s1} fingerprint={_full_noise_vid_s1.flatten()[:4].tolist()}"
         )
 
+        # Snapshot BEFORE the loop mutates clss_config.ema_sigma_max_drift for the
+        # video AdaIN-drift-cap experiment (below).  clss_state.config IS clss_config
+        # (same object, passed by reference) and the audio EMA anchor also reads
+        # clss_config.ema_sigma_max_drift for its OWN, already-validated drift cap —
+        # without this snapshot the video experiment would silently corrupt a
+        # confirmed-working audio mechanism.  The audio anchor uses this fixed
+        # snapshot; only clss_config's live value (read by CLSSState.post_process)
+        # is allowed to change per chunk.
+        _audio_ema_sigma_max_drift = clss_config.ema_sigma_max_drift
+
         for chunk_idx in range(num_chunks):
             is_first = chunk_idx == 0
             chunk_overlap = 0 if is_first else overlap_lf
@@ -639,8 +649,23 @@ class CLSSStreamingSampler:
                     latent_idx=0,
                     strength=1.0 - _tau_c_v,
                 )
+                # EXPERIMENT (flagged, not yet confirmed): the tau_c schedule alone
+                # measurably delayed video repetition saturation but did not eliminate
+                # it on a 15-chunk run (intra_chunk_sim recovered to 0.77-0.85 for a
+                # few chunks after each new anchor, then re-saturated to 0.97+ by
+                # ~chunk 10).  AdaIN's own style-drift cap (ema_sigma_max_drift) is the
+                # one remaining continuity mechanism still fixed at full strength for
+                # the whole run.  CLSSConfig is a plain (non-frozen) dataclass and
+                # CLSSState reads self.config.ema_sigma_max_drift fresh on every
+                # post_process() call, so mutating it here (same object, by reference)
+                # is picked up on this chunk's correction with no pipeline-repo changes.
+                # Conservative ceiling; read vid_intra in the next trend summary to see
+                # if this moves it -- if not, tau_c/AdaIN together are insufficient and
+                # the real fix is global identity anchoring (docs/REF_VIDEO_DESIGN.md).
+                clss_config.ema_sigma_max_drift = _tau_c_eff(0.05, 0.10, chunk_idx - 1)
                 print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
-                      f"ceiling={_VIDEO_TAU_C_CEILING})")
+                      f"ceiling={_VIDEO_TAU_C_CEILING})  "
+                      f"adain_drift_cap_eff={clss_config.ema_sigma_max_drift:.4f} (base=0.05, ceiling=0.10, EXPERIMENTAL)")
 
             # i2v: in-place first-frame conditioning — the canonical LTX i2v path.
             # ComfyUI's LTXVAddGuide itself uses replace_latent_frames for frame_idx=0;
@@ -695,22 +720,23 @@ class CLSSStreamingSampler:
                 # preceded this chunk (av_model.py line 708 prepends ref tokens).
                 if has_aud_ref:
                     ref_slb   = audio_overlap_latent.to(device)   # [B, C, T_ov, freq]
-                    # Progressive, CAPPED noise blend (mirrors LTX's own IC-LoRA
-                    # attention_strength pattern -- an adjustable scalar on how hard a
-                    # conditioning signal pulls generation, here realised as blending
-                    # noise into the reference itself rather than scaling attention).
-                    # ref_audio was injected at full, undecaying strength every chunk;
-                    # confirmed on measured logs that audio within-chunk similarity
-                    # collapses (~0.85→~0.49) the exact chunk its window reaches full
-                    # size — a forcing function, not gentle guidance.  Blend fraction
-                    # grows with chunk index but is CAPPED well under 1.0 so the
-                    # reference never disappears (identity beacon persists; "auto
-                    # slowing down but don't disappear").
-                    _ref_noise_frac = min(0.35, 0.05 * max(0, chunk_idx - 1))
-                    if _ref_noise_frac > 0.0:
-                        _rn = torch.randn_like(ref_slb) * ref_slb.float().std()
-                        ref_slb = (ref_slb.float() * (1 - _ref_noise_frac)
-                                   + _rn * _ref_noise_frac).to(ref_slb.dtype)
+                    # REVISED from the previous noise-blend (measured regression: the
+                    # long t2v run came back "audio ok but quality low" -- injecting iid
+                    # Gaussian noise into a LATENT that gets decoded to audio very
+                    # plausibly reads back as audible grain/hiss, since the model treats
+                    # noise-in-context as content to partially imitate.  Corrupting the
+                    # reference's fidelity was the wrong way to reduce its pull.
+                    #
+                    # Reduce influence by SHRINKING THE WINDOW instead: keep only the
+                    # most recent `n_eff` frames of the (still perfectly clean) tail as
+                    # chunks accumulate, floored so context never fully disappears
+                    # ("auto slowing down but don't disappear").  Less temporal mass in
+                    # the reference = less pull, with zero fidelity cost to what IS kept.
+                    _ref_full_n = ref_slb.shape[2]
+                    _ref_floor  = max(8, _ref_full_n // 3)
+                    _ref_n_eff  = max(_ref_floor, round(_ref_full_n * (0.5 ** (max(0, chunk_idx - 1) / 5.0))))
+                    if _ref_n_eff < _ref_full_n:
+                        ref_slb = ref_slb[:, :, -_ref_n_eff:]
                     b_r, c_r, t_r, f_r = ref_slb.shape
                     ref_tokens = ref_slb.permute(0, 2, 1, 3).reshape(b_r, t_r, c_r * f_r)
                     ref_audio_dict = {"tokens": ref_tokens}
@@ -727,9 +753,9 @@ class CLSSStreamingSampler:
                         "negative": comfy.sampler_helpers.convert_cond(neg_raw),
                     }
                     print(f"[CLSS S1]   audio ref_audio injected: {t_r} tokens "
+                          f"(full={_ref_full_n}f, floor={_ref_floor}f) "
                           f"mean={ref_slb.float().mean():.4f} "
                           f"std={ref_slb.float().std():.4f} "
-                          f"noise_frac={_ref_noise_frac:.3f} "
                           f"nan={ref_slb.isnan().any().item()} "
                           f"inf={ref_slb.isinf().any().item()}")
                 else:
@@ -783,20 +809,22 @@ class CLSSStreamingSampler:
             std_pre   = new_vid.std().item()
             corrected = clss_state.post_process(new_vid)
             # Gentle global-std anchor to chunk-0.  The EMA AdaIN corrects per-channel
-            # stats but its sigma cap still permits ~+5% cumulative std growth over a
-            # long run (measured 1.008→1.054 over 15 chunks); late chunks run hot, and
-            # Stage 2 inherits progressively hotter latents, dropping fidelity toward
-            # the end.  Here we only correct the GLOBAL std when it drifts beyond ±4%
-            # of chunk-0, and only partially (blend 0.5) — enough to stop the monotonic
-            # creep without flattening legitimate per-scene contrast changes.  Mean is
-            # left untouched (it carries scene evolution).
+            # stats but its sigma cap still permits cumulative std growth over a long
+            # run.  MEASURED on the t2v 15-chunk run: with the old ±4%/blend=0.5
+            # settings, std climbed UNCORRECTED from 1.049 to 1.096 across chunks 2-10
+            # (never crossing the trigger), then oscillated 1.11-1.13 pre-correction for
+            # chunks 11-14, each time only partially pulled back to ~1.09 -- chasing a
+            # moving target rather than holding a line, tracking the reported "degrading"
+            # (sustained excess contrast/energy feeding hotter Stage-2 latents).  Tightened
+            # to ±2.5% trigger / 0.7 blend so it engages earlier and corrects more fully.
+            # Mean is left untouched (it carries scene evolution).
             if _s1_vid_std_ref is None:
                 _s1_vid_std_ref = corrected.float().std().item()
             else:
                 _cur_vstd = corrected.float().std().item()
                 _ratio = _s1_vid_std_ref / max(_cur_vstd, 1e-6)
-                if _ratio < 0.96 or _ratio > 1.04:      # only when drift exceeds ±4%
-                    _g_v = 1.0 + 0.5 * (_ratio - 1.0)   # partial pull toward chunk-0
+                if _ratio < 0.975 or _ratio > 1.025:    # tightened from ±4% to ±2.5%
+                    _g_v = 1.0 + 0.7 * (_ratio - 1.0)   # tightened blend from 0.5 to 0.7
                     _m = corrected.float().mean()
                     corrected = ((corrected.float() - _m) * _g_v + _m).to(corrected.dtype)
                     print(f"[CLSS S1]   video std anchor: {_cur_vstd:.4f}→"
@@ -999,7 +1027,10 @@ class CLSSStreamingSampler:
                     # — bounded room for the audio's character to evolve over a long
                     # video, without reopening the divergent-loop failure mode.
                     _lam  = clss_config.ema_lambda
-                    _drift = clss_config.ema_sigma_max_drift
+                    _drift = _audio_ema_sigma_max_drift  # fixed snapshot, NOT clss_config's
+                                                          # live value (see snapshot comment
+                                                          # above the chunk loop) — the video
+                                                          # AdaIN experiment mutates that field
                     _rms0 = _s1_audio_rms_ref
                     with torch.no_grad():
                         _cur_m = new_aud.float().mean(dim=2, keepdim=True)   # raw, pre-correction
