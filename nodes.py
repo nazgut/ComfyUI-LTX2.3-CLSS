@@ -396,6 +396,16 @@ class CLSSStreamingSampler:
                                "attention (pure in-context presence, the ref_audio-equivalent). "
                                "<1.0 = softer (anchor partially noised AND attention "
                                "attenuated).  >1.0 = attention amplified (anchor stays clean)."}),
+                "detail_anchor": (["on", "off"], {
+                    "default": "on",
+                    "tooltip": "Scene-referenced detail-band anchor.  Counters the measured "
+                               "long-run drift where coarse-structure (low-band) energy "
+                               "inflates while high-frequency detail is only ever shrunk — "
+                               "the mechanism behind progressive detail loss.  Symmetric "
+                               "per-band gains sqrt(E_ref/E), hard-capped to [0.90, 1.10] "
+                               "(low) / [0.90, 1.12] (high) per chunk, re-baselined at "
+                               "scene changes.  'off' restores previous behaviour exactly "
+                               "(the vid_hf metric is still logged)."}),
             },
         }
 
@@ -421,6 +431,7 @@ class CLSSStreamingSampler:
         fps: float = 25.0,
         ref_video: str = "off",
         ref_video_strength: float = 1.0,
+        detail_anchor: str = "on",
     ):
         import dataclasses
         import math
@@ -580,6 +591,7 @@ class CLSSStreamingSampler:
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
         _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
         _prev_scene_idx:     int | None = None            # scene of the previous chunk (stat-anchor re-baseline)
+        _s1_band_ref:        tuple[float, float] | None = None  # scene-first (E_low, E_high) detail-band reference
         # Per-chunk trend accumulators → compact end-of-run summary so drift is
         # readable at a glance instead of scraping N chunks by hand.
         _trend = {
@@ -587,6 +599,7 @@ class CLSSStreamingSampler:
             "vid_ident": [],  # identity_sim vs nearest anchor (content drift)
             "vid_intra": [],  # intra-chunk sim — repetition signal (0.73 healthy, 0.97+ = looping)
             "vid_bnd":   [],  # video boundary_sim (chunk seam)
+            "vid_hf":    [],  # high-frequency energy share (detail retention)
             "aud_rms":   [],  # audio RMS AFTER anchor (energy stability)
             "aud_bnd":   [],  # audio boundary_sim (content seam)
             "aud_slb":   [],  # audio SLB honored (continuity mechanism health)
@@ -694,6 +707,7 @@ class CLSSStreamingSampler:
                 _s1_audio_ref_std  = None
                 _s1_audio_ema_rms  = None
                 _s1_audio_ema_dc   = None
+                _s1_band_ref       = None
                 print(f"[CLSS S1]   scene {(_prev_scene_idx or 0) + 1}→{scene_idx + 1}: "
                       f"statistics anchors re-baselined (video std, audio RMS/DC now "
                       f"anchor to this scene's first chunk; content continuity "
@@ -915,6 +929,55 @@ class CLSSStreamingSampler:
             mu_pre    = new_vid.mean().item()
             std_pre   = new_vid.std().item()
             corrected = clss_state.post_process(new_vid)
+
+            # ── Detail-band anchor (scene-first-referenced, symmetric, capped) ──
+            # Root cause of the reported progressive detail loss, grounded in the
+            # §2.4 implementation (clss.py): band gains are (E_ref/E)^γ
+            # .clamp(max=1.0) — SHRINK-ONLY — band 0 (γ=0, coarse structure) is
+            # a pure pass-through, and _BandEMARef is an UNCAPPED EMA that
+            # tracks the drift.  Measured on every long run: band-0 energy
+            # inflates (+19.6% over 7 chunks, +15% over 15 chunks; the EMA ref
+            # itself drifted 1081→1127 legitimizing it) while high bands are
+            # only ever attenuated → the high-frequency SHARE of energy falls
+            # ~20%+ → progressively smoother, less detailed output.  Nothing in
+            # the loop could RESTORE band energy.  This anchor closes exactly
+            # that gap: a two-band (spatial low/high) equalizer with SYMMETRIC
+            # gains sqrt(E_ref/E), hard-capped per chunk, referenced to the
+            # scene's first chunk (re-baselined on scene change, 0019
+            # philosophy).  Complements — does not replace — the §2.4
+            # shrinkage; with detail_anchor="off" behaviour is exactly as
+            # before (the hf metric is still logged).
+            _da_x = corrected.float()
+            _da_b, _da_c, _da_t, _da_h, _da_w = _da_x.shape
+            _da_flat = _da_x.permute(0, 2, 1, 3, 4).contiguous().reshape(
+                _da_b * _da_t, _da_c, _da_h, _da_w)
+            _da_low = torch.nn.functional.avg_pool2d(_da_flat, 3, stride=1, padding=1)
+            _da_high = _da_flat - _da_low
+            _e_low = float(_da_low.pow(2).mean())
+            _e_high = float(_da_high.pow(2).mean())
+            _hf_share = _e_high / max(_e_low + _e_high, 1e-12)
+            if detail_anchor == "on":
+                if _s1_band_ref is None:
+                    _s1_band_ref = (_e_low, _e_high)
+                    print(f"[CLSS S1]   detail anchor: reference captured "
+                          f"E_low={_e_low:.4f} E_high={_e_high:.4f} "
+                          f"hf_share={_hf_share:.4f}")
+                else:
+                    _g_lo = min(1.10, max(0.90, (_s1_band_ref[0] / max(_e_low, 1e-12)) ** 0.5))
+                    _g_hi = min(1.12, max(0.90, (_s1_band_ref[1] / max(_e_high, 1e-12)) ** 0.5))
+                    if abs(_g_lo - 1.0) > 0.005 or abs(_g_hi - 1.0) > 0.005:
+                        corrected = (_da_low * _g_lo + _da_high * _g_hi).reshape(
+                            _da_b, _da_t, _da_c, _da_h, _da_w
+                        ).permute(0, 2, 1, 3, 4).contiguous().to(corrected.dtype)
+                        _e_low_p, _e_high_p = _e_low * _g_lo ** 2, _e_high * _g_hi ** 2
+                        _hf_p = _e_high_p / max(_e_low_p + _e_high_p, 1e-12)
+                        print(f"[CLSS S1]   detail anchor: E_low {_e_low:.4f}→{_e_low_p:.4f} "
+                              f"(g={_g_lo:.4f})  E_high {_e_high:.4f}→{_e_high_p:.4f} "
+                              f"(g={_g_hi:.4f})  hf_share {_hf_share:.4f}→{_hf_p:.4f} "
+                              f"(ref={_s1_band_ref[1] / (_s1_band_ref[0] + _s1_band_ref[1]):.4f})")
+                        _hf_share = _hf_p
+            _trend["vid_hf"].append(_hf_share)
+
             # Gentle global-std anchor to chunk-0.  The EMA AdaIN corrects per-channel
             # stats but its sigma cap still permits ~+5% cumulative std growth over a
             # long run (measured 1.008→1.054 over 15 chunks); late chunks run hot, and
@@ -1264,6 +1327,7 @@ class CLSSStreamingSampler:
         print(_trend_line("vid_ident",  _trend["vid_ident"], want=0.85, tol=0.0))           # content drift
         print(_trend_line("vid_intra", _trend["vid_intra"], want=0.90, tol=0.0, hi_good=False))  # repetition (ceiling, not floor)
         print(_trend_line("vid_bnd",    _trend["vid_bnd"],   want=0.95, tol=0.0))           # seam
+        print(_trend_line("vid_hf",     _trend["vid_hf"],    want=None, tol=0.03))          # detail (HF energy share)
         print(_trend_line("aud_rms",    _trend["aud_rms"],   want=None, tol=0.10))          # energy stability
         print(_trend_line("aud_bnd",    _trend["aud_bnd"],   want=0.80, tol=0.0))           # audio seam
         print(_trend_line("aud_slb",    _trend["aud_slb"],   want=0.97, tol=0.0))           # continuity mech
