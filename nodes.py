@@ -505,13 +505,14 @@ class CLSSStreamingSampler:
 
         if new_lf > 21:
             print(
-                f"[CLSS] WARNING: new_lf={new_lf} exceeds recommended maximum of 21. "
-                f"Early testing (before CLSS corrections) showed 21 latent frames caused near-random "
-                f"intra-chunk content (intra_chunk_sim≈0.03-0.11). With CLSS corrections active "
-                f"(tau_c + AdaIN + shrinkage), values up to ~31 may still be acceptable, but "
-                f"quality degrades with lower step counts or weaker guidance. "
-                f"Reduce to ≤13 frames (≈4 s @ 24 fps) for safest results. "
-                f"Current setting produces ~{new_lf * 8 / 25:.0f}s per chunk at 25fps."
+                f"[CLSS] chunk length: new_lf={new_lf} (~{new_lf * 8 / 25:.1f}s per chunk at 25 fps). "
+                f"Long chunks are supported — the base model natively handles long single "
+                f"windows, and per-chunk generation runs in the model's native regime at "
+                f"any chunk length. Two practical notes: (1) VRAM and per-step time grow "
+                f"with chunk length; (2) the CLSS correction constants (tau_c schedule, "
+                f"AdaIN caps, anchors) were tuned at 13 lf and have not been re-tuned for "
+                f"longer chunks. (An early pre-correction test saw incoherence above 21 lf; "
+                f"that predates the current correction stack and is kept only as history.)"
             )
 
         # Audio overlap proportional to video overlap — carries speech/dialog across chunks.
