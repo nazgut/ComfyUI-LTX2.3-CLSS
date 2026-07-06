@@ -38,6 +38,11 @@ import comfy.sampler_helpers
 import comfy.samplers
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
 from comfy_extras.nodes_lt import LTXVAddGuide
+try:  # ref-video identity anchor rides ComfyUI's per-guide attention machinery;
+      # on older ComfyUI without it the feature self-disables (loud log, no error).
+    from comfy_extras.nodes_lt import _append_guide_attention_entry as _lt_guide_entry
+except Exception:
+    _lt_guide_entry = None
 from comfy_extras.nodes_textgen import LTX2_T2V_SYSTEM_PROMPT
 
 from ltx_pipelines.streaming.clss import CLSSConfig, CLSSState
@@ -374,6 +379,23 @@ class CLSSStreamingSampler:
                                "frozen into the next chunk's context and compounds (observed: "
                                "RMS +58% and high-freq +280% over 7 chunks).  Use 'off' to A/B "
                                "whether the SLB loop drives the drift."}),
+                "ref_video": (["off", "on"], {
+                    "default": "off",
+                    "tooltip": "EXPERIMENTAL global identity anchor (Stage 1).  For every chunk "
+                               "after a scene's first, the scene's identity frame (first chunk's "
+                               "last frame) is appended as a guide keyframe at NEGATIVE temporal "
+                               "RoPE (ends just before t=0 — the video twin of ref_audio), so "
+                               "each chunk asks 'do I still belong to this scene?' instead of "
+                               "only 'do I look like the previous chunk?'.  Uses ComfyUI's "
+                               "first-class guide-keyframe + per-guide attention machinery; the "
+                               "anchor frame is cropped after sampling (output length unchanged). "
+                               "OFF = byte-identical to previous behaviour."}),
+                "ref_video_strength": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Identity-anchor influence.  1.0 = clean anchor, neutral "
+                               "attention (pure in-context presence, the ref_audio-equivalent). "
+                               "<1.0 = softer (anchor partially noised AND attention "
+                               "attenuated).  >1.0 = attention amplified (anchor stays clean)."}),
             },
         }
 
@@ -397,6 +419,8 @@ class CLSSStreamingSampler:
         audio_slb: str = "auto",
         length_seconds: float = 0.0,
         fps: float = 25.0,
+        ref_video: str = "off",
+        ref_video_strength: float = 1.0,
     ):
         import dataclasses
         import math
@@ -598,8 +622,50 @@ class CLSSStreamingSampler:
             f"seed={_noise_seed_s1} fingerprint={_full_noise_vid_s1.flatten()[:4].tolist()}"
         )
 
+        # ── Ref-video identity anchor setup (EXPERIMENTAL, off by default) ──
+        # Rides ComfyUI's first-class guide-keyframe machinery: add_keyframe_index
+        # does `pixel_coords[:, 0] += frame_idx` with NO clamp (verified in this
+        # ComfyUI's nodes_lt.py), so a negative pixel index yields genuinely
+        # negative temporal RoPE — the anchor sits strictly before t=0, ending
+        # just before the timeline, exactly the ref_audio convention.  The guide
+        # is appended as ONE trailing latent frame with noise_mask
+        # max(0, 1−strength) (clean at strength ≥ 1) and a per-guide attention
+        # entry; the model outputs the same shape it receives, and we crop the
+        # anchor frame right after sampling — output length is unchanged.
+        # NOTE (history): an appended keyframe at t=0 on chunk 1 contaminated
+        # audio badly (see the i2v comment below).  This differs on both axes
+        # that mattered: negative time (not an in-timeline duplicate), and never
+        # on a scene's FIRST chunk (chunk-1 audio, which seeds the whole audio
+        # chain, never sees a ref).  Ships off-by-default; validation protocol
+        # watches the audio metrics for any residual cross-modal leak.
+        _rv_ok = False
+        _rv_frame_idx = 0
+        _rv_sf = None
+        _scene_ref_latent: torch.Tensor | None = None
+        _scene_ref_for_scene: int = -1
+        if ref_video == "on":
+            if _lt_guide_entry is None or not hasattr(LTXVAddGuide, "add_keyframe_index") \
+                    or not hasattr(LTXVAddGuide, "append_keyframe"):
+                print("[CLSS] ref_video: DISABLED — this ComfyUI lacks the per-guide "
+                      "attention machinery (nodes_lt._append_guide_attention_entry / "
+                      "LTXVAddGuide.add_keyframe_index).  Update ComfyUI to use it.")
+            else:
+                if vae is not None:
+                    _rv_sf = vae.downscale_index_formula
+                else:
+                    _dm = getattr(getattr(guider.model_patcher, "model", None),
+                                  "diffusion_model", None)
+                    _rv_sf = getattr(_dm, "vae_scale_factors", None) or (8, 32, 32)
+                _rv_frame_idx = -(int(_rv_sf[0]) + 1)   # anchor ends just before t=0
+                _rv_ok = True
+                print(f"[CLSS] ref_video: ON (identity anchor @t=[{_rv_frame_idx},"
+                      f"{_rv_frame_idx + int(_rv_sf[0])}]px, strength={ref_video_strength:.2f}, "
+                      f"1 latent frame appended per chunk ≥ scene-second, cropped after "
+                      f"sampling; scale_factors={tuple(int(s) for s in _rv_sf)})")
+
         for chunk_idx in range(num_chunks):
             is_first = chunk_idx == 0
+            _rv_appended = False
             chunk_overlap = 0 if is_first else overlap_lf
             total_lf = chunk_overlap + new_lf
 
@@ -632,6 +698,7 @@ class CLSSStreamingSampler:
                       f"statistics anchors re-baselined (video std, audio RMS/DC now "
                       f"anchor to this scene's first chunk; content continuity "
                       f"mechanisms unchanged)")
+            _is_scene_first = is_first or scene_idx != _prev_scene_idx
             _prev_scene_idx = scene_idx
 
             has_slb     = not is_first and clss_state._overlap_latent is not None
@@ -691,6 +758,39 @@ class CLSSStreamingSampler:
                 )
                 print(f"[CLSS] i2v: guide placed in-place at frame 0, "
                       f"lat_vid={list(lat_vid.shape)} (no appended tokens)")
+
+            # ── Ref-video identity anchor injection ─────────────────────────
+            # Active only for chunks AFTER a scene's first chunk (the first chunk
+            # ESTABLISHES the scene and captures the anchor below; it must never
+            # itself be conditioned on one — that includes chunk 1, whose audio
+            # seeds the whole audio chain).
+            _rv_active = (_rv_ok and not is_first and not _is_scene_first
+                          and _scene_ref_latent is not None
+                          and _scene_ref_for_scene == scene_idx)
+            if _rv_active:
+                _rv_lat_dev = _scene_ref_latent.to(device=device, dtype=lat_vid.dtype)
+                _p_raw = _unconvert_cond(guider_chunk.original_conds.get("positive", []))
+                _n_raw = _unconvert_cond(guider_chunk.original_conds.get("negative", []))
+                _p_raw, _n_raw, lat_vid, mask_vid = LTXVAddGuide.append_keyframe(
+                    _p_raw, _n_raw, _rv_frame_idx, lat_vid, mask_vid,
+                    _rv_lat_dev, ref_video_strength, _rv_sf,
+                )
+                _p_raw, _n_raw = _lt_guide_entry(
+                    _p_raw, _n_raw,
+                    pre_filter_count=_rv_lat_dev.shape[2] * H * W,
+                    latent_shape=[_rv_lat_dev.shape[2], H, W],
+                    strength=ref_video_strength,
+                )
+                guider_chunk.original_conds = {
+                    **guider_chunk.original_conds,
+                    "positive": comfy.sampler_helpers.convert_cond(_p_raw),
+                    "negative": comfy.sampler_helpers.convert_cond(_n_raw),
+                }
+                _rv_appended = True
+                print(f"[CLSS S1]   ref_video: scene-{scene_idx + 1} anchor appended "
+                      f"@t=[{_rv_frame_idx},{_rv_frame_idx + int(_rv_sf[0])}]px "
+                      f"strength={ref_video_strength:.2f} "
+                      f"({_rv_lat_dev.shape[2] * H * W} tokens, cropped after sampling)")
 
             if aud_tmpl is not None:
                 # Audio latent covers same temporal span as video (overlap + new frames).
@@ -798,6 +898,11 @@ class CLSSStreamingSampler:
             else:
                 vid_out = denoised_samples
                 aud_out = None
+            if _rv_appended:
+                # Drop the trailing anchor frame — everything downstream (overlap
+                # drop, corrections, metrics, accumulation) sees the original
+                # chunk length, exactly as with ref_video off.
+                vid_out = vid_out[:, :, :-_scene_ref_latent.shape[2]]
 
             # i2v: nothing to strip — the guide is conditioned in-place at frame 0.
             # Frame 0 of the output IS the (denoised-around) guide frame; log adherence.
@@ -831,6 +936,16 @@ class CLSSStreamingSampler:
                           f"{corrected.float().std().item():.4f} (ref={_s1_vid_std_ref:.4f}, g={_g_v:.4f})")
             mu_post   = corrected.mean().item()
             std_post  = corrected.std().item()
+            if _rv_ok and _is_scene_first:
+                # Scene identity anchor = first chunk's LAST corrected frame — the
+                # same frame the anchor bank banks (bank_frame_ids show per-chunk
+                # last frames), i.e. the scene as ESTABLISHED, post-onset,
+                # post-corrections.  Kept on CPU; moved to device per use.
+                _scene_ref_latent = corrected[:, :, -1:].detach().to("cpu")
+                _scene_ref_for_scene = scene_idx
+                print(f"[CLSS S1]   ref_video: scene-{scene_idx + 1} identity anchor "
+                      f"captured (chunk {chunk_idx + 1} last frame, "
+                      f"{list(_scene_ref_latent.shape)})")
             clss_state.update_buffer(corrected)
             acc_video.append(corrected.cpu())
 
