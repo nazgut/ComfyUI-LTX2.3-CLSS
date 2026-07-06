@@ -406,6 +406,17 @@ class CLSSStreamingSampler:
                                "(low) / [0.90, 1.12] (high) per chunk, re-baselined at "
                                "scene changes.  'off' restores previous behaviour exactly "
                                "(the vid_hf metric is still logged)."}),
+                "identity_frames": ("INT", {
+                    "default": 2, "min": 0, "max": 3,
+                    "tooltip": "Identity posts: overwrite the first N slots of each chunk's "
+                               "overlap SCAFFOLD (discarded from output) with the scene's "
+                               "first-chunk frames, so every chunk re-sees the true scenery "
+                               "at its strongest context position and self-corrects — the "
+                               "SLB alone guarantees the seam, not the scenery (measured: "
+                               "boundary_sim 0.93-0.99 while content morphs at 25s/38s).  "
+                               "The seam stays enforced by ≥5 untouched previous-tail "
+                               "frames.  2 = default; 3 = stronger pull if morphing "
+                               "persists; 0 = off (byte-identical to previous behaviour)."}),
             },
         }
 
@@ -432,6 +443,7 @@ class CLSSStreamingSampler:
         ref_video: str = "off",
         ref_video_strength: float = 1.0,
         detail_anchor: str = "on",
+        identity_frames: int = 2,
     ):
         import dataclasses
         import math
@@ -657,6 +669,11 @@ class CLSSStreamingSampler:
         _rv_sf = None
         _scene_ref_latent: torch.Tensor | None = None
         _scene_ref_for_scene: int = -1
+        # Identity posts (0024): scene-first chunk's last N frames, re-placed
+        # in-place into the first N slots of every later chunk's overlap
+        # scaffold (user-directed mechanism; see the has_slb block below).
+        _scene_id_latent: torch.Tensor | None = None
+        _scene_id_for_scene: int = -1
         if ref_video == "on":
             if _lt_guide_entry is None or not hasattr(LTXVAddGuide, "add_keyframe_index") \
                     or not hasattr(LTXVAddGuide, "append_keyframe"):
@@ -749,6 +766,38 @@ class CLSSStreamingSampler:
                     latent_idx=0,
                     strength=1.0 - _tau_c_v,
                 )
+                # ── Identity posts (user-directed) ──────────────────────────
+                # The SLB guarantees the SEAM, not the SCENERY: the model honors
+                # the frozen tail and still reinterprets the scene over the 13
+                # free frames (measured: boundary_sim 0.93-0.99 while the user
+                # sees morphs at 25s/38s — drift compounds INSIDE chunks, before
+                # any banking).  Fix: overwrite the FIRST n slots of the overlap
+                # scaffold with the scene's first-chunk frames (pinned identity)
+                # so every chunk re-sees the true scenery at its strongest
+                # context position and corrects itself.  Safe by construction:
+                # (a) in-place replace_latent_frames — the same in-timeline
+                # mechanism that FIXED the 0002 audio contamination; no appended
+                # tokens, nothing at OOD coordinates; (b) the overlap region is
+                # discarded from output (new_vid = vid_out[:, :, chunk_overlap:])
+                # — zero visible frames touched; (c) the seam is untouched: at
+                # least 5 true previous-tail frames remain at [n:overlap], and
+                # the boundary frame is one of them; (d) strength ties to the
+                # SLB's own 1−tau_c_eff — no new constant.  identity_frames=0
+                # disables (byte-identical).
+                _n_id = min(int(identity_frames), 3, max(0, chunk_overlap - 5))
+                if (_n_id > 0 and not _is_scene_first
+                        and _scene_id_latent is not None
+                        and _scene_id_for_scene == scene_idx):
+                    lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
+                        lat_vid, mask_vid,
+                        guiding_latent=_scene_id_latent[:, :, -_n_id:].to(device),
+                        latent_idx=0,
+                        strength=1.0 - _tau_c_v,
+                    )
+                    print(f"[CLSS S1]   identity posts: {_n_id} scene-first frame(s) "
+                          f"→ overlap[0:{_n_id}] (strength={1.0 - _tau_c_v:.4f}; "
+                          f"prev-tail kept at [{_n_id}:{chunk_overlap}] for the seam; "
+                          f"scaffold region, not in output)")
                 print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
                       f"ceiling={_VIDEO_TAU_C_CEILING})")
 
@@ -1000,6 +1049,13 @@ class CLSSStreamingSampler:
                           f"{corrected.float().std().item():.4f} (ref={_s1_vid_std_ref:.4f}, g={_g_v:.4f})")
             mu_post   = corrected.mean().item()
             std_post  = corrected.std().item()
+            if identity_frames > 0 and _is_scene_first:
+                _n_cap = min(int(identity_frames), 3)
+                _scene_id_latent = corrected[:, :, -_n_cap:].detach().to("cpu")
+                _scene_id_for_scene = scene_idx
+                print(f"[CLSS S1]   identity posts: scene-{scene_idx + 1} identity captured "
+                      f"(chunk {chunk_idx + 1}, last {_n_cap} frame(s), "
+                      f"{list(_scene_id_latent.shape)})")
             if _rv_ok and _is_scene_first:
                 # Scene identity anchor = first chunk's LAST corrected frame — the
                 # same frame the anchor bank banks (bank_frame_ids show per-chunk
