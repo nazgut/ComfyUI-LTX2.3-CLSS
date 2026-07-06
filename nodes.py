@@ -1476,6 +1476,16 @@ class CLSSStage2:
                                "one shared audio noise field across chunks.\n"
                                "freeze: previous behaviour — Stage-1 audio passed through unchanged "
                                "(mask=0).  Keep for A/B comparison."}),
+                "s2_audio_denoise": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Denoise fraction for the AUDIO pass in decoupled mode (video "
+                               "pass unaffected).  1.0 = legacy: audio refined at the video's "
+                               "full sigma — measured to re-roll ~half of each chunk's audio "
+                               "(s1_seed_sim 0.53-0.63) and seam the re-rolls at aud_bnd "
+                               "0.27-0.50, the dominant audible defect on long runs.  0.4 "
+                               "(default) = polish: keeps S1's audio content and continuity, "
+                               "re-aligns detail to the refined video.  0.0 = skip the pass "
+                               "(pure S1 audio passthrough, for A/B)."}),
             },
         }
 
@@ -1487,7 +1497,8 @@ class CLSSStage2:
     @torch.inference_mode()
     def sample(self, guider, sampler, sigmas, noise, latent,
                clss_config: CLSSConfig, frames_per_chunk: int,
-               image=None, vae=None, audio_mode: str = "decoupled", s2_overlap: int = 0):
+               image=None, vae=None, audio_mode: str = "decoupled", s2_overlap: int = 0,
+               s2_audio_denoise: float = 0.4):
         samples = latent["samples"]
         is_av = isinstance(samples, comfy.nested_tensor.NestedTensor)
         if is_av:
@@ -1785,11 +1796,34 @@ class CLSSStage2:
                 }
                 print(f"[CLSS S2]   audio 2nd pass (decoupled): chunk_af={chunk_af2} "
                       f"(slb={a_ov2}f tau_c + new={a_new_end - a_new_start}f)  video frozen")
-                _, denoised2 = SamplerCustomAdvanced().sample(
-                    noise=chunk_noise2, guider=active_guider, sampler=sampler,
-                    sigmas=sigmas, latent_image=chunk_latent2,
-                )
-                _, aud_out = denoised2["samples"].unbind()
+                if s2_audio_denoise <= 0.0:
+                    # Pure passthrough: S1 audio is already continuous (measured
+                    # aud_bnd 0.92 post-anchor) — skip the pass entirely for A/B.
+                    aud_out = lat_aud2
+                    print("[CLSS S2]   audio pass SKIPPED (s2_audio_denoise=0) — "
+                          "S1 audio passed through unchanged")
+                else:
+                    # Scale the sigma schedule for the AUDIO pass ONLY.  Measured on
+                    # every run since decoupling: at the video's full σ0 (0.8) the
+                    # audio pass re-rolls ~half of each chunk's audio content
+                    # (s1_seed_sim 0.53-0.63) and seams the re-rolls at aud_bnd
+                    # 0.27-0.50 — destroying the 0.92 continuity S1 built.  σ0=0.8
+                    # is right for VIDEO (frozen S1 video is a scaffold; fid stays
+                    # 0.94-0.99) but audio has no scaffold and no upscaling benefit;
+                    # it needs a polish, not regeneration.  Fraction-scaling keeps
+                    # the distilled schedule's shape; 1.0 reproduces the legacy
+                    # behaviour exactly.
+                    _aud_sigmas = sigmas if s2_audio_denoise >= 0.999 \
+                        else sigmas * float(s2_audio_denoise)
+                    if s2_audio_denoise < 0.999:
+                        print(f"[CLSS S2]   audio sigmas scaled: sigma0 "
+                              f"{float(_aud_sigmas[0]):.3f} (video pass keeps "
+                              f"{float(sigmas[0]):.3f}; s2_audio_denoise={s2_audio_denoise:.2f})")
+                    _, denoised2 = SamplerCustomAdvanced().sample(
+                        noise=chunk_noise2, guider=active_guider, sampler=sampler,
+                        sigmas=_aud_sigmas, latent_image=chunk_latent2,
+                    )
+                    _, aud_out = denoised2["samples"].unbind()
 
             new_vid = vid_out[:, :, chunk_overlap:]
             n_slb   = min(overlap_lf, actual_new)
@@ -1857,7 +1891,7 @@ class CLSSStage2:
                     # chunk-1 audio regenerates from near-scratch at σ0 and shows the
                     # same t≈0 transient.  Fade-in + per-channel soft-clamp before the
                     # tail is saved or accumulated.
-                    if is_first:
+                    if is_first and s2_audio_denoise > 0.0:
                         _n_fade = min(4, new_aud.shape[2])
                         for _i in range(_n_fade):
                             _a = 0.25 + 0.75 * (_i / max(1, _n_fade - 1))
