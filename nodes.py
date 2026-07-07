@@ -618,6 +618,10 @@ class CLSSStreamingSampler:
         _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
         _prev_scene_idx:     int | None = None            # scene of the previous chunk (stat-anchor re-baseline)
         _s1_band_ref:        tuple[float, float] | None = None  # scene-first (E_low, E_high) detail-band reference
+        _origin_ref:         torch.Tensor | None = None   # FIXED scene-first frame (origin-drift telemetry)
+        _origin_layout:      torch.Tensor | None = None   # its low-band spatial map
+        _origin_track:       list = []                    # per-output-frame origin_sim (whole run)
+        _prev_aud_env:       torch.Tensor | None = None   # previous chunk's audio energy envelope
         # Per-chunk trend accumulators → compact end-of-run summary so drift is
         # readable at a glance instead of scraping N chunks by hand.
         _trend = {
@@ -626,6 +630,8 @@ class CLSSStreamingSampler:
             "vid_intra": [],  # intra-chunk sim — repetition signal (0.73 healthy, 0.97+ = looping)
             "vid_bnd":   [],  # video boundary_sim (chunk seam)
             "vid_hf":    [],  # high-frequency energy share (detail retention)
+            "vid_origin": [], # per-chunk floor of frame-vs-scene-first similarity (drift)
+            "aud_env":   [],  # chunk-to-chunk loudness-gesture correlation (repetition)
             "aud_rms":   [],  # audio RMS AFTER anchor (energy stability)
             "aud_bnd":   [],  # audio boundary_sim (content seam)
             "aud_slb":   [],  # audio SLB honored (continuity mechanism health)
@@ -739,6 +745,8 @@ class CLSSStreamingSampler:
                 _s1_audio_ema_rms  = None
                 _s1_audio_ema_dc   = None
                 _s1_band_ref       = None
+                _origin_ref        = None
+                _origin_layout     = None
                 print(f"[CLSS S1]   scene {(_prev_scene_idx or 0) + 1}→{scene_idx + 1}: "
                       f"statistics anchors re-baselined (video std, audio RMS/DC now "
                       f"anchor to this scene's first chunk; content continuity "
@@ -1061,6 +1069,37 @@ class CLSSStreamingSampler:
                         _hf_share = _hf_p
             _trend["vid_hf"].append(_hf_share)
 
+            # ── Origin-drift telemetry (0027) ───────────────────────────────
+            # Every prior video metric compares ADJACENT things (frames, seams)
+            # or DRIFTING references (nearest banked anchor) — smooth morphs
+            # are invisible to all of them (measured: the 25s morph sits inside
+            # chunk 7 which reads boundary 0.9905 / intra 0.9602 / identity
+            # 0.9643).  This tracks every output frame against the FIXED
+            # scene-first frame, so cumulative drift shows as a staircase and
+            # each morph localizes as a per-frame DROP with a timestamp
+            # (end-of-run events table).  layout_sim isolates coarse scene
+            # layout (low-band spatial map) from texture.
+            if _origin_ref is None:
+                _origin_ref = corrected[:, :, -1:].detach().float().cpu()
+                _origin_layout = torch.nn.functional.avg_pool2d(
+                    _origin_ref[0].mean(0), 3, stride=1, padding=1).flatten()
+            _oc = corrected.detach().float().cpu()
+            _o_flat = _origin_ref.flatten()
+            _osims, _lsims = [], []
+            for _fi in range(_oc.shape[2]):
+                _fr = _oc[:, :, _fi:_fi + 1]
+                _osims.append(float(torch.nn.functional.cosine_similarity(
+                    _fr.flatten(), _o_flat, dim=0)))
+                _fl = torch.nn.functional.avg_pool2d(
+                    _fr[0].mean(0), 3, stride=1, padding=1).flatten()
+                _lsims.append(float(torch.nn.functional.cosine_similarity(
+                    _fl, _origin_layout, dim=0)))
+                _origin_track.append(_osims[-1])
+            print(f"[CLSS S1]   origin_sim/frame: {[round(s, 3) for s in _osims]}")
+            print(f"[CLSS S1]   layout_sim/frame: {[round(s, 3) for s in _lsims]}"
+                  f"  (coarse layout vs scene-first)")
+            _trend["vid_origin"].append(min(_osims))
+
             # Gentle global-std anchor to chunk-0.  The EMA AdaIN corrects per-channel
             # stats but its sigma cap still permits ~+5% cumulative std growth over a
             # long run (measured 1.008→1.054 over 15 chunks); late chunks run hot, and
@@ -1191,6 +1230,23 @@ class CLSSStreamingSampler:
                     f"[{' '.join(f'{v:.3f}' for v in _ch_absmax[0].tolist())}]  "
                     f"ch_std: [{' '.join(f'{v:.3f}' for v in _ch_std[0].tolist())}]"
                 )
+                # ── Audio envelope-repetition telemetry (0027) ──────────────
+                # The reported "repetitive sound" is a loudness gesture that
+                # recurs every chunk (peak_frame 67-88/109 in EVERY chunk of
+                # EVERY run).  No existing metric measures it.  This is the
+                # Pearson correlation of this chunk's energy envelope against
+                # the previous chunk's: >0.7 = the same gesture repeating.
+                _env = new_aud.detach().float().pow(2).mean(dim=(0, 1, 3)).cpu()
+                if _prev_aud_env is not None and len(_prev_aud_env) > 8:
+                    _L = min(len(_env), len(_prev_aud_env))
+                    _ea = _env[:_L] - _env[:_L].mean()
+                    _eb = _prev_aud_env[:_L] - _prev_aud_env[:_L].mean()
+                    _env_corr = float((_ea * _eb).sum() /
+                                      (_ea.norm() * _eb.norm() + 1e-8))
+                    print(f"[CLSS S1]   audio_env_corr(prev)={_env_corr:.3f}  "
+                          f"(>0.7 = same loudness gesture repeating each chunk)")
+                    _trend["aud_env"].append(_env_corr)
+                _prev_aud_env = _env
                 # Chunk-1 onset fix: linear fade-in on first 4 latent frames to suppress
                 # the audio-VAE transient from generating unconditioned from pure noise.
                 # Soft per-channel clamp to ±4σ suppresses any remaining outliers.
@@ -1418,6 +1474,9 @@ class CLSSStreamingSampler:
         print(_trend_line("vid_intra", _trend["vid_intra"], want=0.90, tol=0.0, hi_good=False))  # repetition (ceiling, not floor)
         print(_trend_line("vid_bnd",    _trend["vid_bnd"],   want=0.95, tol=0.0))           # seam
         print(_trend_line("vid_hf",     _trend["vid_hf"],    want=None, tol=0.03))          # detail (HF energy share)
+        print(_trend_line("vid_origin", _trend["vid_origin"], want=None, tol=0.10))         # drift vs scene-first
+        if _trend["aud_env"]:
+            print(_trend_line("aud_env", _trend["aud_env"],  want=None, tol=0.30))          # loudness-gesture repetition
         print(_trend_line("aud_rms",    _trend["aud_rms"],   want=None, tol=0.10))          # energy stability
         print(_trend_line("aud_bnd",    _trend["aud_bnd"],   want=0.80, tol=0.0))           # audio seam
         print(_trend_line("aud_slb",    _trend["aud_slb"],   want=0.97, tol=0.0))           # continuity mech
@@ -1425,6 +1484,17 @@ class CLSSStreamingSampler:
         print(_trend_line("aud_hf",     _trend["aud_hf"],    want=None, tol=0.50))          # spectral drift
         print("[CLSS]   verdicts: vid_std/aud_rms/aud_hf check STABILITY (range); "
               "others check a floor. WARN = the likely failure locus.")
+        if len(_origin_track) > 3:
+            _drops = sorted(
+                ((i, _origin_track[i] - _origin_track[i - 1])
+                 for i in range(1, len(_origin_track))),
+                key=lambda x: x[1])[:6]
+            print("[CLSS] ═══ origin-drift events (largest per-frame drops vs "
+                  "scene-first; scene changes appear as events) ═══")
+            for _di, _dd in _drops:
+                print(f"[CLSS]   t={_di * 8 / 25:6.1f}s  lf={_di:3d}  "
+                      f"chunk≈{_di // 13 + 1:2d}  Δorigin_sim={_dd:+.4f}  "
+                      f"(now {_origin_track[_di]:.3f})")
 
         # Output is on CPU — unload models and flush CUDA allocator so the upscale
         # model loads into as much VRAM as possible instead of offloading to CPU.
