@@ -429,6 +429,17 @@ class CLSSStreamingSampler:
                                "(_tau_c_eff docstring) shows held full-strength continuity "
                                "once flipped morphing into LOOPING (intra 0.83→0.96).  "
                                "'off' = previous tau_c behaviour."}),
+                "ref_audio_noise_max": ("FLOAT", {
+                    "default": 0.10, "min": 0.0, "max": 0.5, "step": 0.05,
+                    "tooltip": "Cap on the noise fraction blended into the ref_audio "
+                               "conditioning (ramps 0.05/chunk up to this cap).  Was "
+                               "hardcoded 0.35: from chunk 9 onward the reference audio "
+                               "was one-third noise — measured hiss (freq bands 8-9 at "
+                               "1.8-2.2x reference, 'more noise than sound effects') while "
+                               "the repetition it was meant to prevent happened anyway "
+                               "(audio_env_corr will show it).  0.10 default = mild "
+                               "variation, minimal hiss; 0.35 = previous behaviour; 0.0 = "
+                               "clean reference (watch aud_wc for repetition)."}),
             },
         }
 
@@ -457,6 +468,7 @@ class CLSSStreamingSampler:
         detail_anchor: str = "on",
         identity_frames: int = 0,
         slb_i2v_strength: str = "on",
+        ref_audio_noise_max: float = 0.10,
     ):
         import dataclasses
         import math
@@ -939,7 +951,8 @@ class CLSSStreamingSampler:
                     # grows with chunk index but is CAPPED well under 1.0 so the
                     # reference never disappears (identity beacon persists; "auto
                     # slowing down but don't disappear").
-                    _ref_noise_frac = min(0.35, 0.05 * max(0, chunk_idx - 1))
+                    _ref_noise_frac = min(float(ref_audio_noise_max),
+                                          0.05 * max(0, chunk_idx - 1))
                     if _ref_noise_frac > 0.0:
                         _rn = torch.randn_like(ref_slb) * ref_slb.float().std()
                         ref_slb = (ref_slb.float() * (1 - _ref_noise_frac)
