@@ -417,6 +417,18 @@ class CLSSStreamingSampler:
                                "worsened (a2v attends to the same frames at every chunk "
                                "start).  Mechanism kept only for the record; 0 = inert, "
                                "byte-identical to pre-0024 behaviour."}),
+                "slb_i2v_strength": (["on", "off"], {
+                    "default": "on",
+                    "tooltip": "USER SPEC: freeze the video overlap (previous chunk's tail) "
+                               "at full i2v strength (1.0, mask=0) — exactly the mechanism "
+                               "the i2v guide uses (measured adherence 1.0000) — instead of "
+                               "1−tau_c (0.91-0.95, declining).  Audio SLB unchanged.  At "
+                               "strength 1.0 the new chunk's copy of the overlap is "
+                               "bit-preserved, equivalent to 'remove them from chunk N and "
+                               "keep N+1's'.  Watch vid_intra: the code's measured history "
+                               "(_tau_c_eff docstring) shows held full-strength continuity "
+                               "once flipped morphing into LOOPING (intra 0.83→0.96).  "
+                               "'off' = previous tau_c behaviour."}),
             },
         }
 
@@ -444,6 +456,7 @@ class CLSSStreamingSampler:
         ref_video_strength: float = 1.0,
         detail_anchor: str = "on",
         identity_frames: int = 0,
+        slb_i2v_strength: str = "on",
     ):
         import dataclasses
         import math
@@ -760,11 +773,27 @@ class CLSSStreamingSampler:
             # schedule counts chunks THAT HAVE an overlap (first chunk has none).
             if has_slb:
                 _tau_c_v = _tau_c_eff(clss_config.tau_c, _VIDEO_TAU_C_CEILING, chunk_idx - 1)
+                # ── i2v-strength SLB (user spec) ────────────────────────────
+                # "Take the last N frames of chunk N, add them to N+1 as its
+                # beginning frames, remove them from chunk N — it should work
+                # because i2v works."  Implemented exactly: the overlap is the
+                # previous tail (unchanged) but placed at strength 1.0 (mask=0,
+                # identical to the i2v guide, adherence measured 1.0000) instead
+                # of 1−tau_c_eff (0.91-0.95, declining via the 0016 ramp).  At
+                # strength 1.0 the new chunk's copy of these frames is
+                # bit-preserved, so keeping chunk N's copy in the output is
+                # pixel-identical to "removing them from N and keeping N+1's" —
+                # the accounting is untouched because the two are equivalent.
+                # AUDIO SLB is unchanged (its own tau_c path).  Recorded risk
+                # from _tau_c_eff's measured history: held full-strength
+                # continuity previously flipped the failure mode from morphing
+                # to LOOPING (intra 0.83→0.96) — vid_intra is the readout.
+                _slb_strength_v = 1.0 if slb_i2v_strength == "on" else 1.0 - _tau_c_v
                 lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
                     lat_vid, mask_vid,
                     guiding_latent=clss_state._overlap_latent.to(device),
                     latent_idx=0,
-                    strength=1.0 - _tau_c_v,
+                    strength=_slb_strength_v,
                 )
                 # ── Identity posts (user-directed) ──────────────────────────
                 # The SLB guarantees the SEAM, not the SCENERY: the model honors
@@ -798,8 +827,12 @@ class CLSSStreamingSampler:
                           f"→ overlap[0:{_n_id}] (strength={1.0 - _tau_c_v:.4f}; "
                           f"prev-tail kept at [{_n_id}:{chunk_overlap}] for the seam; "
                           f"scaffold region, not in output)")
-                print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
-                      f"ceiling={_VIDEO_TAU_C_CEILING})")
+                if slb_i2v_strength == "on":
+                    print(f"[CLSS S1]   video SLB: i2v-strength (1.0, fully frozen — tau_c "
+                          f"bypassed for video; audio SLB unchanged)")
+                else:
+                    print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
+                          f"ceiling={_VIDEO_TAU_C_CEILING})")
 
             # i2v: in-place first-frame conditioning — the canonical LTX i2v path.
             # ComfyUI's LTXVAddGuide itself uses replace_latent_frames for frame_idx=0;
