@@ -418,17 +418,15 @@ class CLSSStreamingSampler:
                                "start).  Mechanism kept only for the record; 0 = inert, "
                                "byte-identical to pre-0024 behaviour."}),
                 "slb_i2v_strength": (["on", "off"], {
-                    "default": "on",
-                    "tooltip": "USER SPEC: freeze the video overlap (previous chunk's tail) "
-                               "at full i2v strength (1.0, mask=0) — exactly the mechanism "
-                               "the i2v guide uses (measured adherence 1.0000) — instead of "
-                               "1−tau_c (0.91-0.95, declining).  Audio SLB unchanged.  At "
-                               "strength 1.0 the new chunk's copy of the overlap is "
-                               "bit-preserved, equivalent to 'remove them from chunk N and "
-                               "keep N+1's'.  Watch vid_intra: the code's measured history "
-                               "(_tau_c_eff docstring) shows held full-strength continuity "
-                               "once flipped morphing into LOOPING (intra 0.83→0.96).  "
-                               "'off' = previous tau_c behaviour."}),
+                    "default": "off",
+                    "tooltip": "TESTED, NOT BETTER — keep off.  15-chunk run at strength "
+                               "1.0: morphs persisted (25/37/52s) AND vid_intra hit 0.992 "
+                               "(the looping edge).  Together with the 0.91-0.95 baseline "
+                               "this falsifies context STRENGTH as the morphing lever at "
+                               "both ends; the untested axis is context LENGTH "
+                               "(overlap_lf).  'on' kept for reference: freezes the video "
+                               "overlap at full i2v strength (mask=0), tau_c bypassed for "
+                               "video, audio unchanged."}),
                 "ref_audio_noise_max": ("FLOAT", {
                     "default": 0.10, "min": 0.0, "max": 0.5, "step": 0.05,
                     "tooltip": "Cap on the noise fraction blended into the ref_audio "
@@ -467,7 +465,7 @@ class CLSSStreamingSampler:
         ref_video_strength: float = 1.0,
         detail_anchor: str = "on",
         identity_frames: int = 0,
-        slb_i2v_strength: str = "on",
+        slb_i2v_strength: str = "off",
         ref_audio_noise_max: float = 0.10,
     ):
         import dataclasses
