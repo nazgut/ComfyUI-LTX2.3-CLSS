@@ -407,16 +407,16 @@ class CLSSStreamingSampler:
                                "scene changes.  'off' restores previous behaviour exactly "
                                "(the vid_hf metric is still logged)."}),
                 "identity_frames": ("INT", {
-                    "default": 2, "min": 0, "max": 3,
-                    "tooltip": "Identity posts: overwrite the first N slots of each chunk's "
-                               "overlap SCAFFOLD (discarded from output) with the scene's "
-                               "first-chunk frames, so every chunk re-sees the true scenery "
-                               "at its strongest context position and self-corrects — the "
-                               "SLB alone guarantees the seam, not the scenery (measured: "
-                               "boundary_sim 0.93-0.99 while content morphs at 25s/38s).  "
-                               "The seam stays enforced by ≥5 untouched previous-tail "
-                               "frames.  2 = default; 3 = stronger pull if morphing "
-                               "persists; 0 = off (byte-identical to previous behaviour)."}),
+                    "default": 0, "min": 0, "max": 3,
+                    "tooltip": "FAILED EXPERIMENT — keep at 0.  Tested at 2 and 3 on 15-chunk "
+                               "runs: placing pinned scene-first frames next to the drifted "
+                               "previous-tail creates a content discontinuity inside the "
+                               "conditioning window that the model reads as a SCENE CUT, "
+                               "licensing scenery changes — morphing increased (2: morphs at "
+                               "25/39/51s; 3: continuous morphing), and audio periodicity "
+                               "worsened (a2v attends to the same frames at every chunk "
+                               "start).  Mechanism kept only for the record; 0 = inert, "
+                               "byte-identical to pre-0024 behaviour."}),
             },
         }
 
@@ -443,7 +443,7 @@ class CLSSStreamingSampler:
         ref_video: str = "off",
         ref_video_strength: float = 1.0,
         detail_anchor: str = "on",
-        identity_frames: int = 2,
+        identity_frames: int = 0,
     ):
         import dataclasses
         import math
