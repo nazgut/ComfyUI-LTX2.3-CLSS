@@ -1669,6 +1669,18 @@ class CLSSStage2:
                                "(default) = polish: keeps S1's audio content and continuity, "
                                "re-aligns detail to the refined video.  0.0 = skip the pass "
                                "(pure S1 audio passthrough, for A/B)."}),
+                "s2_audio_slb_af": ("INT", {
+                    "default": 109, "min": 0, "max": 250,
+                    "tooltip": "Stage-2 audio SLB length (audio frames) between S2 windows, "
+                               "DECOUPLED from Stage 1's audio_overlap_af (which video "
+                               "overlap_lf sets — at overlap_lf=3 the S2 seams got only "
+                               "25af ≈ 0.77s of frozen context).  109 ≈ a 13-lf S2 overlap "
+                               "worth; automatically bounded by the actual S2 video overlap "
+                               "time so audio context never precedes the video window.  "
+                               "Pair with s2_audio_denoise 0.8-1.0 for the audio rebuild: "
+                               "regeneration quality at long windows is user-validated "
+                               "(joint σ0.8, single window); this SLB is what makes it "
+                               "seam-safe across multiple windows."}),
             },
         }
 
@@ -1681,7 +1693,7 @@ class CLSSStage2:
     def sample(self, guider, sampler, sigmas, noise, latent,
                clss_config: CLSSConfig, frames_per_chunk: int,
                image=None, vae=None, audio_mode: str = "decoupled", s2_overlap: int = 0,
-               s2_audio_denoise: float = 0.4):
+               s2_audio_denoise: float = 0.4, s2_audio_slb_af: int = 109):
         samples = latent["samples"]
         is_av = isinstance(samples, comfy.nested_tensor.NestedTensor)
         if is_av:
@@ -1956,7 +1968,18 @@ class CLSSStage2:
             # cannot perturb it.  Cost: +1 sampler call per chunk (audio tokens only
             # denoise; video is frozen).
             if has_aud and audio_mode == "decoupled":
-                a_ov2 = 0 if is_first else min(a_ov_af, a_new_start)
+                # S2 audio SLB length decoupled from S1's audio_overlap_af (which
+                # video overlap_lf sets — 25af at overlap 3, starving S2 seams).
+                # Bounded by the S2 VIDEO overlap time (chunk_overlap lf · ~8.41
+                # af/lf, matching S1's accounting for these values) so audio
+                # context never precedes the video window; buffer/position guards
+                # below clip further as before.  User-validated direction: joint
+                # σ0.8 refinement over one long window audibly fixed quality —
+                # decoupled + long SLB makes the same regeneration seam-safe
+                # across multiple windows.
+                a_ov2 = 0 if is_first else min(max(int(s2_audio_slb_af), 0),
+                                               int(chunk_overlap * 8.41),
+                                               a_new_start)
                 chunk_af2 = a_ov2 + (a_new_end - a_new_start)
                 lat_aud2  = torch.zeros(B_a, C_a, chunk_af2, freq, device=device)
                 mask_aud2 = torch.ones(B_a, C_a, chunk_af2, freq, device=device)
@@ -2093,7 +2116,7 @@ class CLSSStage2:
                                            aud_out[:, :, _eff_ov - _slb_n:_eff_ov])
                         print(f"[CLSS S2]   audio SLB honored: {_slb_ok:.4f} (expect ≥0.97)")
                     # Save refined tail as next chunk's audio SLB
-                    _tail_n = min(a_ov_af, new_aud.shape[2])
+                    _tail_n = min(max(int(s2_audio_slb_af), a_ov_af), new_aud.shape[2])
                     s2_audio_overlap = new_aud[:, :, -_tail_n:].clone().cpu()
 
                 if _s2_aud_prev_last is not None:
