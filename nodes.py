@@ -578,6 +578,27 @@ class CLSSStreamingSampler:
             # non-first chunk by 7 px ≈ 0.28 s — a cumulative A/V desync (~1.7 s at
             # 7 chunks: audio ended ~2 s before the video).
             _first_px  = (new_lf - 1) * 8 + 1
+            # ── overlap_lf > new_lf guard (root cause of the 'quick jump forward
+            # at every seam' run) ────────────────────────────────────────────
+            # update_buffer stores min(overlap, F) frames — a chunk produces
+            # new_lf, so the SLB buffer can NEVER hold more than new_lf.  Any
+            # overlap_lf beyond that allocates window slots the replacement
+            # cannot fill: they stay pure noise, get freely generated as
+            # continuation, and the accounting then DISCARDS them — skipping
+            # (overlap_lf−new_lf) frames of motion at every seam.  Measured at
+            # 16/13: video_SLB shape 13 vs overlap=16, biggest drift event at
+            # the first seam (t=4.2s, Δorigin_sim −0.4263), 135af dropped vs a
+            # 109af audio buffer, chunk-2 ref_audio lost.  Clamping here (before
+            # the audio accounting) fixes video window, audio ledger, and ref
+            # saving in one place.
+            if overlap_lf > new_lf:
+                print(f"[CLSS] overlap_lf={overlap_lf} > new_lf={new_lf}: the SLB buffer "
+                      f"only carries the {new_lf} frames a chunk produces — the extra "
+                      f"{overlap_lf - new_lf} slots would be free-generated then DISCARDED, "
+                      f"skipping ~{(overlap_lf - new_lf) * 8 / 25:.1f}s of motion at every "
+                      f"seam.  Clamping effective overlap to {new_lf}.  For longer context, "
+                      f"raise new_lf as well.")
+                overlap_lf = new_lf
             _af_per_px = new_af / _first_px if _first_px > 0 else 0.0
             audio_overlap_af = round(overlap_lf * 8 * _af_per_px)
             new_af_cont      = round(new_lf * 8 * _af_per_px)
