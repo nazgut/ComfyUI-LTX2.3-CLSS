@@ -1789,6 +1789,14 @@ class CLSSStage2:
                 else:
                     print(f"[CLSS] Stage 2: audio REFINED jointly with video (couples "
                           f"modalities; use only as a single chunk).")
+                    if abs(float(s2_audio_denoise) - 1.0) > 1e-6 or int(s2_audio_slb_af) != 109:
+                        print(f"[CLSS] WARNING: s2_audio_denoise={s2_audio_denoise} and "
+                              f"s2_audio_slb_af={s2_audio_slb_af} have NO EFFECT in "
+                              f"audio_mode='refine' — the joint pass shares ONE sigma "
+                              f"schedule with video (σ0=0.8) and uses no separate audio "
+                              f"SLB.  Measured: sweeping s2_audio_denoise 0.1/0.4/1.0 in "
+                              f"this mode gave bit-identical audio (s1_seed_sim 0.624x).  "
+                              f"Switch audio_mode to 'decoupled' to use these knobs.")
             else:
                 print(f"[CLSS] Stage 2: audio frozen (mask=0) — Stage 1 audio passed through unchanged.")
         print(f"[CLSS] Stage 2: CLSS AdaIN/shrinkage corrections DISABLED — "
