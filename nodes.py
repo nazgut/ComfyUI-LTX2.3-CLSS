@@ -438,6 +438,17 @@ class CLSSStreamingSampler:
                                "(audio_env_corr will show it).  0.10 default = mild "
                                "variation, minimal hiss; 0.35 = previous behaviour; 0.0 = "
                                "clean reference (watch aud_wc for repetition)."}),
+                "audio_ref_af": ("INT", {
+                    "default": 67, "min": 0, "max": 200,
+                    "tooltip": "Length (audio frames) of the S1 ref_audio conditioning, "
+                               "DECOUPLED from video overlap.  ref_audio tokens are "
+                               "appended conditioning (entry['ref_audio']), not window "
+                               "content — their length is architecturally free.  It was "
+                               "implicitly tied to the audio overlap: at overlap_lf=3 that "
+                               "starved it to 25af (0.77s) — measured aud_wc collapse "
+                               "0.91→0.27 and RMS inflation 0.66→0.89 across the run.  "
+                               "67 restores the overlap-8-era anchor at ANY video overlap.  "
+                               "0 disables ref_audio entirely."}),
             },
         }
 
@@ -467,6 +478,7 @@ class CLSSStreamingSampler:
         identity_frames: int = 0,
         slb_i2v_strength: str = "off",
         ref_audio_noise_max: float = 0.10,
+        audio_ref_af: int = 67,
     ):
         import dataclasses
         import math
@@ -1417,13 +1429,14 @@ class CLSSStreamingSampler:
                         _tail_cur if _s1_audio_tail is None
                         else torch.cat([_s1_audio_tail, _tail_cur], dim=2)
                     )
-                    if _s1_audio_tail.shape[2] > 2 * ov:
-                        _s1_audio_tail = _s1_audio_tail[:, :, -2 * ov:]
+                    _ref_keep = ov + max(int(audio_ref_af), 0)
+                    if _s1_audio_tail.shape[2] > _ref_keep:
+                        _s1_audio_tail = _s1_audio_tail[:, :, -_ref_keep:]
                     _s1_audio_tail = _s1_audio_tail.clone()
                     _tail_lf = _s1_audio_tail.shape[2]
                     pre_ov_end = max(0, _tail_lf - ov)   # tail's last ov frames = next overlap
-                    if pre_ov_end > 0:
-                        _ref_start = max(0, pre_ov_end - ov)
+                    if pre_ov_end > 0 and int(audio_ref_af) > 0:
+                        _ref_start = max(0, pre_ov_end - int(audio_ref_af))
                         audio_overlap_latent = _s1_audio_tail[:, :, _ref_start:pre_ov_end].clone()
                         print(f"[CLSS S1]   audio ref saved: {audio_overlap_latent.shape[2]}f "
                               f"(tail[{_ref_start}:{pre_ov_end}], tail_len={_tail_lf})  "
