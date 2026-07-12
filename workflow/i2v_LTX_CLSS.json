@@ -60,7 +60,7 @@
       "upscale_method": "lanczos",
       "scale_by": 0.5,
       "image": [
-        "79",
+        "88",
         0
       ]
     },
@@ -83,7 +83,7 @@
   },
   "10": {
     "inputs": {
-      "value": 97
+      "value": 242
     },
     "class_type": "PrimitiveInt",
     "_meta": {
@@ -175,31 +175,10 @@
       "title": "RandomNoise"
     }
   },
-  "18": {
-    "inputs": {
-      "cfg": 4,
-      "model": [
-        "3",
-        0
-      ],
-      "positive": [
-        "23",
-        0
-      ],
-      "negative": [
-        "23",
-        1
-      ]
-    },
-    "class_type": "CFGGuider",
-    "_meta": {
-      "title": "CFG Guider"
-    }
-  },
   "19": {
     "inputs": {
       "av_latent": [
-        "52",
+        "81",
         0
       ]
     },
@@ -384,7 +363,7 @@
   "34": {
     "inputs": {
       "av_latent": [
-        "98",
+        "83",
         0
       ]
     },
@@ -477,11 +456,46 @@
       "title": "DualCLIPLoader (GGUF)"
     }
   },
-  "52": {
+  "58": {
     "inputs": {
-      "num_chunks": 3,
+      "prompts": "From the driver's first-person perspective, a classic red vintage Ferrari convertible hugs the winding Pacific Coast Highway, its glossy hood and chrome grille leading the view as the car glides through a gentle right-hand curve. The driver's tanned hands grip the black leather steering wheel at ten and two, fingers tapping rhythmically as the asphalt rushes beneath the open hood. The bright white dashboard gauges and the wind buffeting the windshield frame fill the immediate foreground, while the steering wheel slightly rotates with each turn. Through the curved glass, the deep blue Pacific Ocean sparkles intensely to the right, with whitecaps breaking against scattered rocks just offshore, while dry golden-brown hills rise steeply on the left, dotted with green coastal scrub. A fixed, eye-level POV camera is mounted just behind the steering wheel, looking straight ahead over the hood, perfectly framing the road's center line as it unfurls toward the horizon. Late afternoon golden hour light pours through the windshield, casting warm orange and yellow glare across the polished chrome and leather, with long shadows stretching from the front wheels.",
+      "max_length": 512,
+      "clip": [
+        "47",
+        0
+      ]
+    },
+    "class_type": "CLSSScenePrompts",
+    "_meta": {
+      "title": "CLSS Scene Prompts"
+    }
+  },
+  "79": {
+    "inputs": {
+      "tau_c": 0.05,
+      "beta": 0.4,
+      "overlap": 8
+    },
+    "class_type": "CLSSConfig",
+    "_meta": {
+      "title": "CLSS Config"
+    }
+  },
+  "81": {
+    "inputs": {
+      "num_chunks": 10,
+      "length_seconds": 0,
+      "fps": [
+        "12",
+        0
+      ],
+      "audio_slb": "auto",
+      "detail_anchor": "on",
+      "ref_audio_noise_max": 0.1,
+      "audio_ref_af": 67,
+      "audio_ctx_flatten": "on",
       "guider": [
-        "99",
+        "94",
         0
       ],
       "sampler": [
@@ -501,11 +515,11 @@
         0
       ],
       "clss_config": [
-        "96",
+        "79",
         0
       ],
       "image": [
-        "8",
+        "88",
         0
       ],
       "vae": [
@@ -518,62 +532,28 @@
       "title": "CLSS Streaming Sampler"
     }
   },
-  "58": {
-    "inputs": {
-      "prompts": "3D, POV driving a sleek Lotus-style sports car along the sunny Malibu coastline, golden sunlight reflecting off the ocean, palm trees passing by, smooth winding roads, vibrant summer colors, cinematic motion, ultra-realistic detailing, high-end luxury car aesthetic, 8K resolution.",
-      "max_length": 512,
-      "clip": [
-        "47",
-        0
-      ]
-    },
-    "class_type": "CLSSScenePrompts",
-    "_meta": {
-      "title": "CLSS Scene Prompts"
-    }
-  },
-  "79": {
-    "inputs": {
-      "image": "image.jpeg"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Load Image"
-    }
-  },
-  "96": {
+  "82": {
     "inputs": {
       "tau_c": 0.05,
       "beta": 0.4,
-      "ema_lambda": 0.1,
-      "overlap": 8,
-      "anchor_force_every": 5,
-      "sigma_max_drift": 0.05,
-      "adain_max_amplification": 1.2
+      "overlap": 8
     },
     "class_type": "CLSSConfig",
     "_meta": {
       "title": "CLSS Config"
     }
   },
-  "97": {
-    "inputs": {
-      "tau_c": 0.05,
-      "beta": 0.4,
-      "ema_lambda": 0.1,
-      "overlap": 8,
-      "anchor_force_every": 5,
-      "sigma_max_drift": 0.05,
-      "adain_max_amplification": 1.2
-    },
-    "class_type": "CLSSConfig",
-    "_meta": {
-      "title": "CLSS Config"
-    }
-  },
-  "98": {
+  "83": {
     "inputs": {
       "frames_per_chunk": 0,
+      "s2_overlap": 0,
+      "audio_mode": "decoupled",
+      "s2_audio_denoise": 0.4,
+      "s2_audio_slb_af": 109,
+      "fps": [
+        "12",
+        0
+      ],
       "guider": [
         "31",
         0
@@ -595,11 +575,11 @@
         0
       ],
       "clss_config": [
-        "97",
+        "82",
         0
       ],
       "image": [
-        "79",
+        "88",
         0
       ],
       "vae": [
@@ -612,17 +592,40 @@
       "title": "CLSS Stage 2"
     }
   },
-  "99": {
+  "88": {
     "inputs": {
+      "image": "ComfyUI_02713_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "94": {
+    "inputs": {
+      "video_cfg": 4,
       "audio_cfg": 7,
-      "guider": [
-        "18",
+      "modality_scale": 3,
+      "rescale": 0.7,
+      "video_stg": 1,
+      "audio_stg": 1,
+      "stg_block": 28,
+      "model": [
+        "3",
         0
+      ],
+      "positive": [
+        "23",
+        0
+      ],
+      "negative": [
+        "23",
+        1
       ]
     },
-    "class_type": "CLSSAVGuider",
+    "class_type": "CLSSAVGuiderV2",
     "_meta": {
-      "title": "CLSS AV Guider (Split CFG)"
+      "title": "CLSS AV Guider V2 (Split CFG + Modality)"
     }
   }
 }
