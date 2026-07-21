@@ -711,7 +711,8 @@ class CLSSStreamingSampler:
         _s1_audio_ema_rms:   float | None = None          # slow-drifting RMS anchor target (capped vs origin)
         _s1_audio_ema_dc:    torch.Tensor | None = None   # slow-drifting per-channel DC anchor target (capped vs origin)
         _s1_audio_rms_ref:   float | None = None         # chunk-0 scalar RMS (onset-excluded) — correction target
-        _s1_audio_freq_ref:  list[float]  | None = None  # chunk-0 per-bin energy reference
+        _s1_audio_freq_ref:  list[float]  | None = None  # chunk-0 per-bin energy reference (fixed, diagnostic only)
+        _s1_audio_freq_ema:  list[float]  | None = None  # drift-capped per-bin energy target (mutable, HF shrink)
         # Rolling audio tail (reference pipeline.py:771-806): last 2×overlap frames of
         # accumulated output, kept across chunks.  Lets ref_audio be a FULL overlap-length
         # window ending immediately before the next overlap, even when that window spans
@@ -854,6 +855,45 @@ class CLSSStreamingSampler:
                 )
                 print(f"[CLSS] i2v: guide placed in-place at frame 0, "
                       f"lat_vid={list(lat_vid.shape)} (no appended tokens)")
+
+            # §2.5 Dynamic anchor bank — wired as an in-place NUDGE, not the reference
+            # library's VideoConditionByKeyframeIndex.  That class appends a SEPARATE
+            # token block at frame_idx=0 (torch.cat onto the end of the sequence,
+            # RoPE pointing back to t=0) — exactly the append-style mechanism the i2v
+            # guide above was rewritten to AVOID, because in AV mode the audio tokens
+            # attend to that out-of-place block for the whole chunk and came out as
+            # noise/drone regardless of guidance.  Reusing it here would very likely
+            # reopen that same corruption for any chunk carrying an anchor.
+            #
+            # Instead: retrieve the best non-redundant anchor (same retrieve() logic
+            # as the reference — cosine similarity to the current overlap's last
+            # frame, skipping anchors too similar to the overlap to add information)
+            # and place it in-place via the SAME safe mechanism as the SLB/i2v guide
+            # above (LTXVAddGuide.replace_latent_frames) — but at the FIRST NEW frame
+            # (chunk_overlap), never at frame 0, which the SLB already owns and whose
+            # exact seam continuity must not be disturbed.  Strength is capped well
+            # below the reference default (anchor_strength=1.0 there means "clean,
+            # zero denoising" for a lightweight parallel token — applying that same
+            # 1.0 to REPLACE a real new-content frame would hard-pin it to a static
+            # past image, freezing motion at that position).  This is a gentle pull
+            # toward long-range identity, not a rewrite: the frame is still mostly
+            # noise and gets denoised normally.
+            if has_slb and clss_config.anchor_top_m > 0:
+                _anchors = clss_state._anchor_bank.retrieve(
+                    clss_state._overlap_latent.to(device), clss_config.anchor_top_m, chunk_idx,
+                )
+                if _anchors:
+                    _a = _anchors[0]  # top-1 by similarity — a nudge, not a hard rewrite
+                    _a_strength = min(0.35, float(clss_config.anchor_strength))
+                    lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
+                        lat_vid, mask_vid,
+                        guiding_latent=_a.latent.to(device),
+                        latent_idx=chunk_overlap,
+                        strength=_a_strength,
+                    )
+                    print(f"[CLSS S1]   anchor nudge: frame@{chunk_overlap} ← "
+                          f"anchor@frame{_a.frame_idx}  strength={_a_strength:.2f}  "
+                          f"bank_size={len(clss_state._anchor_bank.anchors)}")
 
             if aud_tmpl is not None:
                 # Audio latent covers same temporal span as video (overlap + new frames).
@@ -1346,6 +1386,46 @@ class CLSSStreamingSampler:
                           f"rms {_aud_rms:.4f}→{new_aud.float().pow(2).mean().sqrt().item():.4f} "
                           f"(g={_g.item():.4f}, ema_rms={_s1_audio_ema_rms:.4f}, rms0={_rms0:.4f})  "
                           f"DC removed/ch=[{' '.join(f'{v:+.3f}' for v in _dc_removed)}]")
+                # Audio high-frequency soft shrinkage — mirrors the video mechanism
+                # (§2.4: attenuate-only, EMA reference updated with the CORRECTED
+                # energy so the target can evolve without reopening a divergent loop)
+                # but applied directly on the audio latent's native per-bin frequency
+                # axis (dim -1) instead of an FFT decomposition — the audio VAE's last
+                # channel dimension is already frequency-resolved (this is exactly what
+                # the aud_hf diagnostic above measures).  The RMS/DC anchor bounds
+                # *broadband* energy only; it does not touch the *spectral shape*, and
+                # a T2V run showed the top 4 bins growing unchecked to 2.1-2.65x the
+                # chunk-1 reference by chunk 7 despite RMS/DC being perfectly anchored.
+                # Reuses freq_gamma[-1] (the video shrinkage's strongest band exponent)
+                # rather than adding a new config field — same tuned constant, same
+                # "only shrink measured excess" philosophy.
+                with torch.no_grad():
+                    _freq_e_post = new_aud.float().abs().mean(dim=(0, 1, 2)).tolist()
+                if _s1_audio_freq_ema is None:
+                    _s1_audio_freq_ema = list(_freq_e_post)
+                else:
+                    _hf_gamma = clss_config.freq_gamma[-1]
+                    _n_hf = min(4, len(_freq_e_post))
+                    _gains = [1.0] * len(_freq_e_post)
+                    for _b in range(len(_freq_e_post) - _n_hf, len(_freq_e_post)):
+                        _e_ref, _e_cur = _s1_audio_freq_ema[_b], _freq_e_post[_b]
+                        if _e_cur > 1e-8 and _e_ref > 1e-8:
+                            _gains[_b] = min(1.0, (_e_ref / _e_cur) ** _hf_gamma)
+                    if any(g < 1.0 for g in _gains):
+                        _gain_t = torch.tensor(_gains, device=new_aud.device,
+                                                dtype=torch.float32).view(1, 1, 1, -1)
+                        new_aud = (new_aud.float() * _gain_t).to(aud_out.dtype)
+                        with torch.no_grad():
+                            _freq_e_post = new_aud.float().abs().mean(dim=(0, 1, 2)).tolist()
+                        print(f"[CLSS S1]   audio HF shrink: "
+                              f"gain[-{_n_hf}:]=[{' '.join(f'{g:.4f}' for g in _gains[-_n_hf:])}]")
+                    # EMA updated with the CORRECTED (post-shrink) energy — mirrors the
+                    # video band reference exactly (clss.py _BandEMARef.update).
+                    _lam = clss_config.ema_lambda
+                    _s1_audio_freq_ema = [
+                        (1 - _lam) * ref + _lam * cur
+                        for ref, cur in zip(_s1_audio_freq_ema, _freq_e_post)
+                    ]
                 # Trend: RMS and boundary measured on the FINAL kept audio (post-anchor,
                 # post-onset-fix) — this is what actually reaches the SLB/output, so it
                 # is the honest stability signal.  The boundary print above is pre-anchor;
