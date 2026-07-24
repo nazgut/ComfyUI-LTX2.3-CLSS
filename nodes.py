@@ -414,14 +414,20 @@ class CLSSStreamingSampler:
                     "tooltip": "Frame rate used to convert length_seconds to frames.  Must match "
                                "the frame_rate set on LTXVConditioning."}),
                 "audio_slb": (["auto", "on", "off"], {
-                    "default": "off",
-                    "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
-                               "design).  off: reference-pipeline design — overlap audio is "
-                               "regenerated at full noise and dropped; continuity via ref_audio "
-                               "only.  The SLB is a feedback path: a drifting audio tail gets "
-                               "frozen into the next chunk's context and compounds (observed: "
-                               "RMS +58% and high-freq +280% over 7 chunks).  Use 'off' to A/B "
-                               "whether the SLB loop drives the drift."}),
+                    "default": "auto",
+                    "tooltip": "on/auto: freeze the previous chunk's overlap-time audio at "
+                               "tau_c (in-window content continuity — the model HEARS the "
+                               "song/speech it must continue).  off: reference-pipeline "
+                               "design — overlap audio is regenerated at full noise and "
+                               "dropped; continuity via ref_audio only.  Measured with off "
+                               "(10-chunk t2v): aud_bnd 0.21-0.53 → every chunk invents new "
+                               "music, speech unintelligible; ref_audio alone is too weak "
+                               "(boundary cos ~0.14 over 15 chunks).  The SLB was previously "
+                               "blamed for the metronome and defaulted off — that lock is "
+                               "now broken structurally by overlap_jitter, so the SLB is "
+                               "safe to keep ON (the per-chunk energy anchor bounds its "
+                               "feedback path).  Division of labor: jitter = anti-loop, "
+                               "SLB = content continuity."}),
                 "detail_anchor": (["on", "off"], {
                     "default": "on",
                     "tooltip": "Scene-referenced detail-band anchor.  Counters the measured "
@@ -585,8 +591,11 @@ class CLSSStreamingSampler:
             # BEFORE new_aud feeds the SLB/ref, so the fed-forward context can no
             # longer drift.  Without the SLB, ref_audio is the only cross-chunk
             # continuity and it is too weak (measured audio boundary cos ~0.14 over
-            # 15 chunks — audible timbral seams every chunk).  Keep the SLB ON at
-            # any length; the anchor keeps it stable.
+            # 15 chunks — audible timbral seams every chunk; 10-chunk t2v with
+            # slb=off: aud_bnd 0.21-0.53, every chunk invents new music, speech
+            # unintelligible).  Keep the SLB ON at any length; the anchor keeps it
+            # stable, and the metronome it was once blamed for is now handled
+            # structurally by overlap_jitter (see _overlap_for_chunk).
             audio_slb = "on"
             print(f"[CLSS] auto: audio_slb=on (energy anchor makes the SLB safe at any "
                   f"length; provides cross-chunk audio content continuity)")
