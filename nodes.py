@@ -414,20 +414,14 @@ class CLSSStreamingSampler:
                     "tooltip": "Frame rate used to convert length_seconds to frames.  Must match "
                                "the frame_rate set on LTXVConditioning."}),
                 "audio_slb": (["auto", "on", "off"], {
-                    "default": "auto",
-                    "tooltip": "on/auto: freeze the previous chunk's overlap-time audio at "
-                               "tau_c (in-window content continuity — the model HEARS the "
-                               "song/speech it must continue).  off: reference-pipeline "
-                               "design — overlap audio is regenerated at full noise and "
-                               "dropped; continuity via ref_audio only.  Measured with off "
-                               "(10-chunk t2v): aud_bnd 0.21-0.53 → every chunk invents new "
-                               "music, speech unintelligible; ref_audio alone is too weak "
-                               "(boundary cos ~0.14 over 15 chunks).  The SLB was previously "
-                               "blamed for the metronome and defaulted off — that lock is "
-                               "now broken structurally by overlap_jitter, so the SLB is "
-                               "safe to keep ON (the per-chunk energy anchor bounds its "
-                               "feedback path).  Division of labor: jitter = anti-loop, "
-                               "SLB = content continuity."}),
+                    "default": "off",
+                    "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
+                               "design).  off: reference-pipeline design — overlap audio is "
+                               "regenerated at full noise and dropped; continuity via ref_audio "
+                               "only.  The SLB is a feedback path: a drifting audio tail gets "
+                               "frozen into the next chunk's context and compounds (observed: "
+                               "RMS +58% and high-freq +280% over 7 chunks).  Use 'off' to A/B "
+                               "whether the SLB loop drives the drift."}),
                 "detail_anchor": (["on", "off"], {
                     "default": "on",
                     "tooltip": "Scene-referenced detail-band anchor.  Counters the measured "
@@ -479,21 +473,6 @@ class CLSSStreamingSampler:
                                "  off = keep raw model output (no anchor) — most faithful "
                                "to a single generation, but watch aud_rms for divergence "
                                "on long runs."}),
-                "overlap_jitter": (["on", "off"], {
-                    "default": "on",
-                    "tooltip": "Per-chunk overlap phase-jitter (anti-loop).  Cycles the "
-                               "chunk overlap through [full, half, 3/4] of the configured "
-                               "value so no two consecutive chunks have the same window "
-                               "shape.  WHY: the measured audio/video repetition is a "
-                               "fixed point of the chunk map — every chunk ≥2 has an "
-                               "IDENTICAL window shape, so the kept region is always the "
-                               "same phase of the model's window arc and the arc replays "
-                               "phase-locked to the chunk grid (audio_env_corr → 0.84, "
-                               "video boundary_sim → 0.97, peak_frame locked).  Jittering "
-                               "the overlap changes each chunk's task (window length, "
-                               "drop phase, ref content) so no single arc can be a fixed "
-                               "point.  Video and audio overlaps stay proportional — no "
-                               "A/V offset.  'off' = constant overlap (previous behaviour)."}),
             },
         }
 
@@ -521,7 +500,6 @@ class CLSSStreamingSampler:
         audio_ref_af: int = 67,
         audio_ctx_flatten: str = "off",
         audio_anchor: str = "rms_only",
-        overlap_jitter: str = "on",
     ):
         import dataclasses
         import math
@@ -539,7 +517,6 @@ class CLSSStreamingSampler:
         print(f"[CLSS]   audio_slb={audio_slb!r}  detail_anchor={detail_anchor!r}")
         print(f"[CLSS]   audio_ref_af={audio_ref_af}  "
               f"audio_ctx_flatten={audio_ctx_flatten!r}  audio_anchor={audio_anchor!r}")
-        print(f"[CLSS]   overlap_jitter={overlap_jitter!r}")
         print(f"[CLSS]   clss_config={dataclasses.asdict(clss_config)}")
         print(f"[CLSS]   noise.seed={getattr(noise, 'seed', 'unknown')}  "
               f"guider.cfg={getattr(guider, 'cfg', getattr(guider, 'cfg_scale', 'unknown'))}  "
@@ -591,11 +568,8 @@ class CLSSStreamingSampler:
             # BEFORE new_aud feeds the SLB/ref, so the fed-forward context can no
             # longer drift.  Without the SLB, ref_audio is the only cross-chunk
             # continuity and it is too weak (measured audio boundary cos ~0.14 over
-            # 15 chunks — audible timbral seams every chunk; 10-chunk t2v with
-            # slb=off: aud_bnd 0.21-0.53, every chunk invents new music, speech
-            # unintelligible).  Keep the SLB ON at any length; the anchor keeps it
-            # stable, and the metronome it was once blamed for is now handled
-            # structurally by overlap_jitter (see _overlap_for_chunk).
+            # 15 chunks — audible timbral seams every chunk).  Keep the SLB ON at
+            # any length; the anchor keeps it stable.
             audio_slb = "on"
             print(f"[CLSS] auto: audio_slb=on (energy anchor makes the SLB safe at any "
                   f"length; provides cross-chunk audio content continuity)")
@@ -682,37 +656,6 @@ class CLSSStreamingSampler:
                   f"{(num_chunks * new_lf - 1) * 8 + 1}px")
         else:
             B_a = C_a = new_af = freq = audio_overlap_af = new_af_cont = 0
-
-        # ── Per-chunk overlap phase-jitter (anti-loop, chunk-native) ────────
-        # The measured audio/video repetition is a FIXED POINT of the chunk
-        # map: with a constant overlap, every chunk ≥2 has an identical window
-        # shape, so the kept region is always the SAME PHASE of the model's
-        # window arc and the arc replays phase-locked to the chunk grid
-        # (audio_env_corr → 0.84, video boundary_sim → 0.97, peak_frame locked
-        # at 102/109 on the 10-chunk runs; the lock engages the chunk ref_audio
-        # reaches full length — hence "audio repeats after chunk 1").  Cycling
-        # the overlap through [full, half, ¾] makes consecutive chunks solve
-        # DIFFERENT tasks (window length, drop phase, and ref content all
-        # change), so no single arc can be the fixed point.  Video and audio
-        # overlaps stay proportional (derived from the same per-chunk value) —
-        # zero A/V offset, and the video timeline is untouched (each chunk
-        # still keeps exactly new_lf frames; only the regenerated/dropped
-        # lead-in length varies).  overlap_lf stays the configured MAXIMUM:
-        # the SLB buffer (update_buffer stores min(overlap_lf, F) frames) and
-        # the audio tail always hold enough context; each chunk slices the
-        # LAST chunk_overlap frames of it.
-        def _overlap_for_chunk(i: int) -> int:
-            if overlap_jitter == "off" or overlap_lf <= 2:
-                return overlap_lf
-            return (overlap_lf,
-                    max(1, overlap_lf // 2),
-                    max(1, (3 * overlap_lf) // 4))[i % 3]
-
-        if overlap_jitter == "on" and overlap_lf > 2:
-            print(f"[CLSS] overlap jitter: per-chunk overlap cycle "
-                  f"[{_overlap_for_chunk(3)}, {_overlap_for_chunk(1)}, {_overlap_for_chunk(2)}] lf "
-                  f"(full/half/¾ of {overlap_lf}) — no two consecutive chunks share a "
-                  f"window phase (anti-loop; video+audio stay proportional)")
 
         # Read scene conditionings already stored inside the guider.
         # original_conds["positive"] is a list of converted cond dicts (one per scene
@@ -870,12 +813,8 @@ class CLSSStreamingSampler:
 
         for chunk_idx in range(num_chunks):
             is_first = chunk_idx == 0
-            chunk_overlap = 0 if is_first else _overlap_for_chunk(chunk_idx)
+            chunk_overlap = 0 if is_first else overlap_lf
             total_lf = chunk_overlap + new_lf
-            # Per-chunk audio overlap, proportional to the video overlap (same
-            # real-time span).  Varies with the jitter cycle; audio_overlap_af
-            # stays the configured MAX (buffer/tail sizing).
-            _ov_a_k = round(chunk_overlap * 8 * _af_per_px) if aud_tmpl is not None else 0
 
             scene_idx = 0
             if num_scenes > 1:
@@ -939,12 +878,9 @@ class CLSSStreamingSampler:
             # schedule counts chunks THAT HAVE an overlap (first chunk has none).
             if has_slb:
                 _tau_c_v = _tau_c_eff(clss_config.tau_c, _VIDEO_TAU_C_CEILING, chunk_idx - 1)
-                # Slice the LAST chunk_overlap frames of the SLB buffer (it holds
-                # up to overlap_lf = the configured max; the jittered per-chunk
-                # overlap is ≤ that).  Immediately-preceding frames, as required.
                 lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
                     lat_vid, mask_vid,
-                    guiding_latent=clss_state._overlap_latent.to(device)[:, :, -chunk_overlap:],
+                    guiding_latent=clss_state._overlap_latent.to(device),
                     latent_idx=0,
                     strength=1.0 - _tau_c_v,
                 )
@@ -995,7 +931,7 @@ class CLSSStreamingSampler:
                 # Audio latent covers same temporal span as video (overlap + new frames).
                 # cur_new_af: chunk-1 covers (new_lf−1)·8+1 px; later chunks new_lf·8 px.
                 cur_new_af = new_af if is_first else new_af_cont
-                chunk_af = _ov_a_k + cur_new_af
+                chunk_af = (audio_overlap_af if not is_first else 0) + cur_new_af
                 lat_aud  = torch.zeros(B_a, C_a, chunk_af, freq, device=device)
                 # [B, 1, T, 1] broadcasts correctly through reshape_mask → [B, C, T, freq]
                 mask_aud = torch.ones(B_a, 1, chunk_af, 1, device=device)
@@ -1008,12 +944,9 @@ class CLSSStreamingSampler:
                 _slb_ctx_used: torch.Tensor | None = None   # what was actually PLACED (for the honored check)
                 if has_aud_slb and audio_slb == "on":
                     slb = audio_slb_latent.to(device)
-                    n   = min(_ov_a_k, slb.shape[2], chunk_af)
+                    n   = min(audio_overlap_af, slb.shape[2], chunk_af)
                     _tau_c_a = _tau_c_eff(clss_config.tau_c, _AUDIO_TAU_C_CEILING, chunk_idx - 1)
-                    # LAST n frames of the saved tail (it is stored at the
-                    # configured-max length; the jittered per-chunk overlap n
-                    # is ≤ that) — the audio immediately preceding this window.
-                    _slb_ctx = slb[:, :, -n:]
+                    _slb_ctx = slb[:, :, :n]
                     if audio_ctx_flatten == "on":
                         _slb_ctx, _fg_lo, _fg_hi = _flatten_audio_env(_slb_ctx)
                         print(f"[CLSS S1]   audio SLB env-flattened: gain=[{_fg_lo:.3f}, "
@@ -1048,13 +981,8 @@ class CLSSStreamingSampler:
                     # reaches full window, independent of these.  The loop is a
                     # structural property of chunked autoregression over a static
                     # prompt; perturbing the reference only adds noise energy the
-                    # model renders as drone/hiss.  A full-video single-pass
-                    # re-render was implemented and REJECTED by design (CLSS is
-                    # for arbitrary length — a whole-video window defeats it).
-                    # The chunk-native attack is the overlap phase-jitter (see
-                    # _overlap_for_chunk): it changes each chunk's window shape,
-                    # so no single arc can be the fixed point — the ref stays
-                    # clean.
+                    # model renders as drone/hiss.  Only a non-chunked re-render
+                    # (VRAM-blocked) can address the loop — so the ref is now clean.
                     if audio_ctx_flatten == "on":
                         # Legacy env-flatten lever (off by default; another de-lock
                         # experiment — see dead-end log above).
@@ -1084,9 +1012,9 @@ class CLSSStreamingSampler:
                 else:
                     print(f"[CLSS S1]   audio: no ref_audio (first chunk — generating unconditioned)")
 
-                _n_slb = min(_ov_a_k, audio_slb_latent.shape[2]) if has_aud_slb else 0
+                _n_slb = min(audio_overlap_af, audio_slb_latent.shape[2]) if has_aud_slb else 0
                 print(f"[CLSS S1]   audio in: chunk_af={chunk_af} "
-                      f"(slb={_n_slb}f tau_c + overlap_rest={_ov_a_k - _n_slb}f + new={cur_new_af}f) "
+                      f"(slb={_n_slb}f tau_c + overlap_rest={audio_overlap_af - _n_slb}f + new={new_af}f) "
                       f"mask_mean={mask_aud.mean():.3f}")
                 av_samples = comfy.nested_tensor.NestedTensor((lat_vid, lat_aud))
                 av_mask    = comfy.nested_tensor.NestedTensor((mask_vid, mask_aud))
@@ -1101,7 +1029,7 @@ class CLSSStreamingSampler:
                 _full_noise_vid_s1, _s1_noise_pos, chunk_overlap, seed=_noise_seed_s1,
                 full_noise_aud=_full_noise_aud_s1,
                 a_pos=_s1_a_noise_pos,
-                a_overlap=_ov_a_k,
+                a_overlap=(audio_overlap_af if not is_first else 0),
             )
             print(
                 f"[CLSS S1]   noise pos={_s1_noise_pos}"
@@ -1350,9 +1278,9 @@ class CLSSStreamingSampler:
 
             if aud_out is not None:
                 # Drop the audio overlap-time region (covers the same time as the video SLB).
-                # Non-first chunks generate chunk_af = _ov_a_k + cur_new_af frames;
-                # we keep only the cur_new_af portion.  First chunk: no drop.
-                aud_drop = _ov_a_k
+                # Non-first chunks generate chunk_af = audio_overlap_af + new_af frames;
+                # we keep only the new_af portion.  First chunk: no drop (chunk_af = new_af).
+                aud_drop = audio_overlap_af if not is_first else 0
                 if aud_drop > 0 and aud_out.shape[2] < aud_drop:
                     print(f"[CLSS S1]   audio ERROR: aud_out.shape={list(aud_out.shape)} "
                           f"but aud_drop={aud_drop} — model returned fewer audio frames than "
@@ -1369,14 +1297,14 @@ class CLSSStreamingSampler:
                       f"({new_aud.shape[2]}f kept, {aud_drop}f overlap-time dropped)")
                 # SLB-honored check: with tau_c=0.05, the SLB frames should survive nearly
                 # unchanged → cosine ≥ 0.97.  Low value → noise_mask not applied → wrong diag.
-                if not is_first and audio_slb_latent is not None and _ov_a_k > 0:
+                if not is_first and audio_slb_latent is not None and audio_overlap_af > 0:
                     # Compare against what was PLACED (env-flattened when
                     # audio_ctx_flatten is on), not the raw saved tail —
                     # otherwise the flatten reads as a false SLB violation.
                     _slb_expect = (_slb_ctx_used if _slb_ctx_used is not None
-                                   else audio_slb_latent[:, :, -_ov_a_k:])
+                                   else audio_slb_latent)
                     _slb_sim = _aud_cos(_slb_expect.to(device),
-                                        aud_out[:, :, :_ov_a_k])
+                                        aud_out[:, :, :audio_overlap_af])
                     print(f"[CLSS S1]   audio SLB honored: {_slb_sim:.4f} (expect ≥0.97)")
                     _trend["aud_slb"].append(_slb_sim)
                 # Per-channel max-abs for first 8 frames (diagnose onset spike in chunk 1)
@@ -1568,15 +1496,9 @@ class CLSSStreamingSampler:
                     if abs(_bnd_final - (_trend["aud_bnd"][-1] if _trend["aud_bnd"] else _bnd_final)) > 0.02:
                         print(f"[CLSS S1]   audio_boundary_sim(post-anchor)={_bnd_final:.4f}")
                 if audio_overlap_af > 0:
-                    ov = audio_overlap_af   # configured MAX (sizing only)
-                    # Next chunk's jittered overlap — the ref window and the SLB
-                    # slice placed next chunk are derived from THIS, not the max.
-                    _ov_next   = _overlap_for_chunk(chunk_idx + 1) if chunk_idx + 1 < num_chunks else 0
-                    _ov_a_next = round(_ov_next * 8 * _af_per_px)
-                    # Audio SLB for next chunk: last ov (max) frames of new_aud =
-                    # the temporal period that will be the next chunk's video SLB
-                    # time.  Stored at max length; the placement slices the LAST
-                    # n = min(_ov_a_k, ...) frames (see the audio SLB block).
+                    ov = audio_overlap_af
+                    # Audio SLB for next chunk: last ov frames of new_aud = the temporal
+                    # period that will be the next chunk's video SLB time.
                     if new_aud.shape[2] >= ov:
                         audio_slb_latent = new_aud[:, :, -ov:].cpu()
                     else:
@@ -1585,11 +1507,10 @@ class CLSSStreamingSampler:
                           f"mean={audio_slb_latent.float().mean():.4f}")
                     # ref_audio for next chunk: frames BEFORE the overlap period,
                     # taken from a rolling tail of accumulated output (reference
-                    # pipeline.py:771-806).  The tail keeps the last ov+ref_af
-                    # frames across chunk boundaries, so the reference window is
-                    # always a FULL ref_af frames ending immediately before the
-                    # NEXT chunk's (jittered) overlap — even when the
-                    # within-chunk pre-overlap region is shorter than that.
+                    # pipeline.py:771-806).  The tail keeps the last 2×ov frames across
+                    # chunk boundaries, so the reference window is always a FULL ov
+                    # frames ending immediately before the overlap — even when the
+                    # within-chunk pre-overlap region is shorter than ov.
                     _tail_cur = new_aud.cpu()
                     _s1_audio_tail = (
                         _tail_cur if _s1_audio_tail is None
@@ -1600,18 +1521,17 @@ class CLSSStreamingSampler:
                         _s1_audio_tail = _s1_audio_tail[:, :, -_ref_keep:]
                     _s1_audio_tail = _s1_audio_tail.clone()
                     _tail_lf = _s1_audio_tail.shape[2]
-                    pre_ov_end = max(0, _tail_lf - _ov_a_next)   # tail's last _ov_a_next = next overlap
+                    pre_ov_end = max(0, _tail_lf - ov)   # tail's last ov frames = next overlap
                     if pre_ov_end > 0 and int(audio_ref_af) > 0:
                         _ref_start = max(0, pre_ov_end - int(audio_ref_af))
                         audio_overlap_latent = _s1_audio_tail[:, :, _ref_start:pre_ov_end].clone()
                         print(f"[CLSS S1]   audio ref saved: {audio_overlap_latent.shape[2]}f "
-                              f"(tail[{_ref_start}:{pre_ov_end}], tail_len={_tail_lf}, "
-                              f"next_ov={_ov_a_next}f)  "
+                              f"(tail[{_ref_start}:{pre_ov_end}], tail_len={_tail_lf})  "
                               f"mean={audio_overlap_latent.float().mean():.4f}")
                     else:
                         audio_overlap_latent = None
                         print(f"[CLSS S1]   audio ref NOT saved: tail too short "
-                              f"({_tail_lf}f ≤ {_ov_a_next}f)")
+                              f"({_tail_lf}f ≤ {ov}f)")
                 acc_audio.append(new_aud.cpu())
                 audio_chunk_ends.append(sum(a.shape[2] for a in acc_audio))
                 _s1_aud_prev_last = new_aud[:, :, -1:].cpu()

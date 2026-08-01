@@ -43,12 +43,24 @@
       "title": "CLIP Text Encode (Prompt)"
     }
   },
+  "7": {
+    "inputs": {
+      "width": 1280,
+      "height": 720,
+      "batch_size": 1,
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "Empty Image"
+    }
+  },
   "8": {
     "inputs": {
       "upscale_method": "lanczos",
       "scale_by": 0.5,
       "image": [
-        "104",
+        "7",
         0
       ]
     },
@@ -521,14 +533,6 @@
       "clss_config": [
         "82",
         0
-      ],
-      "image": [
-        "104",
-        0
-      ],
-      "vae": [
-        "2",
-        0
       ]
     },
     "class_type": "CLSSStage2",
@@ -585,28 +589,11 @@
       "clss_config": [
         "99",
         0
-      ],
-      "image": [
-        "8",
-        0
-      ],
-      "vae": [
-        "2",
-        0
       ]
     },
     "class_type": "CLSSStreamingSampler",
     "_meta": {
       "title": "CLSS Streaming Sampler"
-    }
-  },
-  "104": {
-    "inputs": {
-      "image": "ComfyUI_02713_.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Load Image"
     }
   }
 }
