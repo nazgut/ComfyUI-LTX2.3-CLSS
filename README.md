@@ -40,14 +40,18 @@ See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-ch
 
 ## Installation
 
-1. Clone into your ComfyUI `custom_nodes` directory:
+1. Clone into your ComfyUI `custom_nodes` directory (**with submodules** — the CLSS
+   algorithm lives in the `Ltx-2-CLSS` submodule):
 
    ```bash
    cd ComfyUI/custom_nodes
-   git clone https://github.com/nazgut/ComfyUI-LTX-CLSS.git
+   git clone --recurse-submodules https://github.com/nazgut/ComfyUI-LTX-CLSS.git
    ```
 
-2. Restart ComfyUI. The vendored `Ltx-2-CLSS/packages` sources are injected into `sys.path` automatically — no pip install step.
+   Already cloned without `--recurse-submodules`? Run
+   `git submodule update --init` inside the repo.
+
+2. Restart ComfyUI. The `Ltx-2-CLSS/packages` sources are injected into `sys.path` automatically — no pip install step.
 
 3. Download the models (HuggingFace):
    - `Lightricks/LTX-2.3` — 22B checkpoint (GGUF Q4_K_S recommended for 16 GB VRAM), video/audio VAEs, spatial upscaler, distilled LoRA
@@ -82,14 +86,16 @@ nodes.py              # all ComfyUI node implementations
 workflow/             # example ComfyUI workflow (i2v)
 paper/                # CLSS paper (LaTeX + PDF) and experiment logs
 simulations/          # standalone pure-math diagnostic scripts (no GPU needed)
-Ltx-2-CLSS/           # vendored fork of Lightricks' LTX-2 monorepo with the
-                      # CLSS additions (separate git history):
+Ltx-2-CLSS/           # git submodule (github.com/nazgut/Ltx-2-CLSS) — a fork of
+                      # Lightricks' LTX-2 monorepo with the CLSS additions:
                       #   packages/ltx-pipelines/.../streaming/  ← the CLSS algorithm
                       #   generate_clss.py                     ← standalone CLI
                       #   convert_gguf.py                      ← GGUF→BF16 pre-conversion
 ```
 
-Note: this repository contains **two nested git repos** — commit ComfyUI-node changes here and `Ltx-2-CLSS/` changes in the inner repo.
+Note: `Ltx-2-CLSS` is a **submodule with its own history** — commit ComfyUI-node
+changes in this repo and algorithm changes in the submodule (then bump the
+submodule pointer here).
 
 ## Standalone generation (no ComfyUI)
 
