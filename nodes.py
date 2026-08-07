@@ -76,6 +76,32 @@ def _frame_cos(a: torch.Tensor, b: torch.Tensor) -> float:
         return (fa * fb).sum(dim=1).mean().item()
 
 
+def _grid_cell_cos(img_a: torch.Tensor, img_b: torch.Tensor, grid: int = 8) -> tuple[float, float]:
+    """Per-cell cosine similarity between two decoded frames.
+
+    Convention: img_a/img_b are [H, W, C] (the ComfyUI IMAGE per-frame layout —
+    one frame of `vae.decode` output).  H and W are each split into `grid`
+    slices (edge cells absorb the remainder when the side is not divisible),
+    every cell is flattened over (h, w, C) and compared by cosine similarity.
+    Returns (mean, min) over the grid×grid cells.
+
+    Why: mean-pooled identity_sim can stay high when a single object is
+    replaced (the pooled feature is dominated by the unchanged background);
+    the per-cell MIN localizes exactly that failure.  Pure torch, CPU-safe.
+    """
+    with torch.no_grad():
+        a = img_a.float()
+        b = img_b.float()
+        sims: list[float] = []
+        for rows_a, rows_b in zip(torch.tensor_split(a, grid, dim=0),
+                                  torch.tensor_split(b, grid, dim=0)):
+            for cell_a, cell_b in zip(torch.tensor_split(rows_a, grid, dim=1),
+                                      torch.tensor_split(rows_b, grid, dim=1)):
+                sims.append(float(F.cosine_similarity(
+                    cell_a.flatten(), cell_b.flatten(), dim=0)))
+        return sum(sims) / len(sims), min(sims)
+
+
 def _aud_cos(a: torch.Tensor, b: torch.Tensor) -> float:
     """Cosine similarity between two audio latent tensors (flatten everything except batch).
 
@@ -117,16 +143,13 @@ def _flatten_audio_env(x: torch.Tensor) -> tuple[torch.Tensor, float, float]:
     spectral content and timbre are preserved, the loudness ARC is removed.
     Returns (flattened, min_gain, max_gain).
 
-    Why: measured metronomic repetition (10-chunk runs).  Every chunk's audio
-    peaks at the SAME frame (102/109 for 8 straight chunks), the SLB tail fed
-    to the next chunk always CONTAINS that crescendo peak, and the ref_audio
-    carries the build-up before it — so every chunk sees the same loudness
-    geometry at the same context positions and replays the same dip-then-
-    crescendo arc (env_corr 0.77-0.90; chunk starts vs their own middles
-    collapse 0.95→0.31).  Flattening only the CONTEXT (the output audio is
-    untouched) removes the loudness template while keeping content
-    continuity.  Validated (overlap-8 run): layout/audio phase-lock broke,
-    chunk-start collapse gone (0.90-0.92 all run).
+    Applied ALWAYS-ON to the audio context (SLB + ref_audio) — the output
+    audio is untouched.  As an anti-repetition lever it is a recorded dead
+    end (loop unchanged; see the dead-end log at the ref_audio site), but
+    same-seed live runs showed it protects the VIDEO: two runs with the
+    context flattened had no morphing, the same-prompt run without it morphed
+    (2026-08-05) — plausible in the joint AV transformer, where over-loud
+    audio context tokens distort shared self-attention.
 
     GAIN CAP [0.6, 1.25], asymmetric by design.  The first (unbounded)
     version amplified chunk-2's quietest ref frames ×2.98 — boosting their
@@ -238,15 +261,35 @@ class CLSSConfigNode:
                                       "tooltip": "Overlap latent frames shared between chunks."}),
             },
             "optional": {
-                "noise_temporal_corr": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.8, "step": 0.05,
-                                      "tooltip": "EXPERIMENTAL (unvalidated): mix a run-constant shared "
-                                                 "frame into every S1 video noise frame — targets the ~4s "
-                                                 "layout oscillation by making the initial noise "
-                                                 "temporally correlated (marginals stay exactly N(0,1); "
-                                                 "frame-to-frame noise correlation = this value). "
-                                                 "0 = off (bit-exact baseline). Changes the generated "
-                                                 "video like a seed change would; too high → static "
-                                                 "content. Suggested first trial: 0.3."}),
+                "noise_temporal_corr": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 0.8, "step": 0.05,
+                                      "tooltip": "Mix a run-constant shared frame into every S1 video "
+                                                 "noise frame, making the initial noise temporally "
+                                                 "correlated (marginals stay exactly N(0,1); frame-to-frame "
+                                                 "noise correlation = this value). 0.3 is the validated "
+                                                 "production value (paper i2v/t2v runs); 0 = off (independent "
+                                                 "white noise per frame — degrades cross-chunk consistency). "
+                                                 "Changes the generated video like a seed change would; "
+                                                 "too high → static content."}),
+                "measure_g": (["off", "on"], {
+                    "default": "off",
+                    "tooltip": "Measure the open-loop transformer gain g_SLB (paper Eq. 8): "
+                               "runs a SECOND denoising pass per chunk with a perturbed "
+                               "overlap (~2x Stage-1 compute) and logs g_SLB per chunk + in "
+                               "the trend summary.  Diagnostic only — the perturbed pass is "
+                               "discarded, generation is completely unaffected.  The number "
+                               "this produces was previously described (§3.5) but never "
+                               "measured; enable on a validation run to record it."}),
+                "measure_g_epsilon": ("FLOAT", {
+                    "default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.001,
+                    "tooltip": "Perturbation magnitude for measure_g, as a fraction of the "
+                               "overlap-latent norm.  Used only when measure_g=on."}),
+                "shrinkage": (["on", "off"], {
+                    "default": "on",
+                    "tooltip": "Spectral-shrinkage ablation arm.  'off' sets freq_gamma to "
+                               "all zeros (§2.4 frequency-band soft shrinkage disabled); "
+                               "'on' uses the CLSSConfig dataclass defaults verbatim.  "
+                               "A/B against vid_hf / detail loss to isolate the shrinkage "
+                               "contribution."}),
             },
         }
         # Everything else is fixed or derived automatically:
@@ -259,7 +302,13 @@ class CLSSConfigNode:
     FUNCTION = "build"
     CATEGORY = "LTX-CLSS"
 
-    def build(self, tau_c, beta, overlap, noise_temporal_corr=0.0):
+    def build(self, tau_c, beta, overlap, noise_temporal_corr=0.3,
+              measure_g="off", measure_g_epsilon=0.01, shrinkage="on"):
+        import dataclasses
+        # Read the freq_gamma default live from the CLSSConfig dataclass so the
+        # node can never drift from the validated value in clss.py.
+        _fg_default = next(f.default for f in dataclasses.fields(CLSSConfig)
+                           if f.name == "freq_gamma")
         return (CLSSConfig(
             tau_c=tau_c,
             beta=beta,
@@ -268,7 +317,11 @@ class CLSSConfigNode:
             anchor_force_every=0,            # sentinel: auto-derived in the sampler
             overlap_latent_frames=overlap,
             adain_max_amplification=1.2,     # fixed: caps AdaIN grain boost
-            measure_g=False,                 # fixed: diagnostic-only, disabled
+            measure_g=(measure_g == "on"),   # default off: diagnostic-only (was hard-coded False)
+            measure_g_epsilon=float(measure_g_epsilon),
+            # shrinkage ablation: "off" zeros every band (n_freq_bands-length tuple)
+            freq_gamma=(_fg_default if shrinkage == "on"
+                        else tuple(0.0 for _ in _fg_default)),
             noise_temporal_corr=noise_temporal_corr,
         ),)
 
@@ -368,7 +421,17 @@ def _tau_c_eff(base: float, ceiling: float, chunk_idx: int, half_life: float = 5
 
 
 _VIDEO_TAU_C_CEILING = 0.10   # conservative: half the empirically-unstable 0.20
-_AUDIO_TAU_C_CEILING = 0.15   # audio has the EMA anchor as a backstop
+# Audio SLB re-noise runs hotter than video (base ×3, ceiling 0.35 → schedule
+# ≈0.15→0.28 over 10 chunks).  Measured motivation (2026-08-05, same-seed I2V
+# A/B): at the old schedule (0.05→0.12) the SLB tail passes ~90% verbatim and
+# carries the loudness gesture chunk→chunk — env_corr locks 0.87-0.97 with
+# phase-locked peaks (the audible mid-video loop).  Removing the SLB entirely
+# breaks the loop but collapses seams (aud_bnd 0.28-0.58, hf runaway
+# 0.54→1.25).  This schedule is the middle ground: enough fresh noise to wash
+# the gesture out of the tail, enough tail kept for seam continuity.  Audio
+# has the RMS anchor as a backstop.  VALIDATE BY EAR before adopting.
+_AUDIO_TAU_C_BASE_MULT = 3.0
+_AUDIO_TAU_C_CEILING = 0.35
 
 
 class CLSSStreamingSampler:
@@ -402,26 +465,10 @@ class CLSSStreamingSampler:
                                                "Resized automatically to match the latent spatial dimensions."}),
                 "vae":   ("VAE",   {"tooltip": "VAE for encoding the i2v guide image. "
                                                "Connect the VAE from LTXVideo Loader. Required when image is connected."}),
-                "length_seconds": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.5,
-                    "tooltip": "Requested video duration in seconds.  When > 0, num_chunks is "
-                               "DERIVED from this (reference build_chunk_schedule behaviour): "
-                               "total latent frames = ceil from duration at `fps`, chunks = "
-                               "ceil(total_lf / new_lf).  Actual duration (rounded up to whole "
-                               "chunks) is logged.  0 = use the num_chunks input directly."}),
                 "fps": ("FLOAT", {
                     "default": 24.0, "min": 1.0, "max": 60.0, "step": 1.0,
-                    "tooltip": "Frame rate used to convert length_seconds to frames.  Must match "
-                               "the frame_rate set on LTXVConditioning."}),
-                "audio_slb": (["auto", "on", "off"], {
-                    "default": "off",
-                    "tooltip": "on: freeze previous chunk's overlap-time audio at tau_c (current "
-                               "design).  off: reference-pipeline design — overlap audio is "
-                               "regenerated at full noise and dropped; continuity via ref_audio "
-                               "only.  The SLB is a feedback path: a drifting audio tail gets "
-                               "frozen into the next chunk's context and compounds (observed: "
-                               "RMS +58% and high-freq +280% over 7 chunks).  Use 'off' to A/B "
-                               "whether the SLB loop drives the drift."}),
+                    "tooltip": "Frame rate used for audio accounting and time labels in "
+                               "the log.  Must match the frame_rate set on LTXVConditioning."}),
                 "detail_anchor": (["on", "off"], {
                     "default": "on",
                     "tooltip": "Scene-referenced detail-band anchor.  Counters the measured "
@@ -432,30 +479,6 @@ class CLSSStreamingSampler:
                                "(low) / [0.90, 1.12] (high) per chunk, re-baselined at "
                                "scene changes.  'off' restores previous behaviour exactly "
                                "(the vid_hf metric is still logged)."}),
-                "audio_ref_af": ("INT", {
-                    "default": 67, "min": 0, "max": 200,
-                    "tooltip": "Length (audio frames) of the S1 ref_audio conditioning, "
-                               "DECOUPLED from video overlap.  ref_audio tokens are "
-                               "appended conditioning (entry['ref_audio']), not window "
-                               "content — their length is architecturally free.  It was "
-                               "implicitly tied to the audio overlap: at overlap_lf=3 that "
-                               "starved it to 25af (0.77s) — measured aud_wc collapse "
-                               "0.91→0.27 and RMS inflation 0.66→0.89 across the run.  "
-                               "67 restores the overlap-8-era anchor at ANY video overlap.  "
-                               "0 disables ref_audio entirely."}),
-                "audio_ctx_flatten": (["on", "off"], {
-                    "default": "off",
-                    "tooltip": "Flatten the loudness ENVELOPE of the audio context (SLB + "
-                               "ref_audio) fed to each next chunk — content/timbre kept, "
-                               "loudness arc removed; output audio untouched.  Targets the "
-                               "measured metronome: audio peak locked at frame 102/109 for "
-                               "8 straight chunks, env_corr 0.77-0.90, chunk-start vs "
-                               "mid-chunk sim collapsing 0.95→0.31 — the crescendo tail in "
-                               "the SLB re-seeds the same dip-then-crescendo arc every "
-                               "chunk.  'off' = raw context (previous behaviour).  Watch "
-                               "aud_env / the phase-lock check to judge; risk to watch: "
-                               "aud_bnd (context loudness no longer matches the kept "
-                               "previous tail exactly)."}),
                 "audio_anchor": (["rms_dc", "rms_only", "off"], {
                     "default": "rms_only",
                     "tooltip": "Per-chunk audio energy anchor applied to the kept audio "
@@ -473,6 +496,25 @@ class CLSSStreamingSampler:
                                "  off = keep raw model output (no anchor) — most faithful "
                                "to a single generation, but watch aud_rms for divergence "
                                "on long runs."}),
+                "open_loop": (["off", "on"], {
+                    "default": "off",
+                    "tooltip": "Open-loop BASELINE arm for ablation: naive sliding-window "
+                               "generation — disables ALL closed-loop corrections (overlap "
+                               "re-noising is forced to tau_c=0 frozen SLB, AdaIN + spectral "
+                               "shrinkage skipped, detail/std anchors skipped, audio RMS "
+                               "anchor treated as 'off').  SLB/anchor-bank telemetry keeps "
+                               "running so trend lines stay comparable against closed-loop "
+                               "runs.  Expect vid_std / aud_rms drift to return — that is "
+                               "the measurement."}),
+                "object_identity": (["off", "on"], {
+                    "default": "off",
+                    "tooltip": "Spatially-resolved identity metric: decodes a short clip "
+                               "around each chunk seam (requires vae connected) and reports "
+                               "per-grid-cell (8x8) cosine — mean AND min — between the two "
+                               "pixel frames straddling the seam.  Catches localized object "
+                               "replacement that the mean-pooled identity_sim averages "
+                               "away; watch the MIN.  Logged as vid_obj in the trend "
+                               "summary.  Metric only, generation unaffected."}),
             },
         }
 
@@ -493,13 +535,11 @@ class CLSSStreamingSampler:
         num_chunks: int,
         image=None,
         vae=None,
-        audio_slb: str = "off",
-        length_seconds: float = 0.0,
         fps: float = 24.0,
         detail_anchor: str = "on",
-        audio_ref_af: int = 67,
-        audio_ctx_flatten: str = "off",
         audio_anchor: str = "rms_only",
+        open_loop: str = "off",
+        object_identity: str = "off",
     ):
         import dataclasses
         import math
@@ -507,16 +547,16 @@ class CLSSStreamingSampler:
         # ── Full settings dump (raw inputs, unconditional) ──────────────────
         # Printed BEFORE any auto-derivation so two runs with identical widget
         # values produce byte-identical text here — diff this block first when
-        # two "same settings" runs disagree.  Auto-derived values (num_chunks
-        # from length_seconds, anchor_force_every, audio_slb) are logged
-        # separately below, at the point they're computed.
+        # two "same settings" runs disagree.  Auto-derived values
+        # (anchor_force_every) are logged separately below, at the point
+        # they're computed.
         print("[CLSS] ══════════ SETTINGS: CLSSStreamingSampler (Stage 1) ══════════")
-        print(f"[CLSS]   num_chunks={num_chunks}  length_seconds={length_seconds}  fps={fps}")
+        print(f"[CLSS]   num_chunks={num_chunks}  fps={fps}")
         print(f"[CLSS]   image={'connected' if image is not None else 'none'}  "
               f"vae={'connected' if vae is not None else 'none'}")
-        print(f"[CLSS]   audio_slb={audio_slb!r}  detail_anchor={detail_anchor!r}")
-        print(f"[CLSS]   audio_ref_af={audio_ref_af}  "
-              f"audio_ctx_flatten={audio_ctx_flatten!r}  audio_anchor={audio_anchor!r}")
+        print(f"[CLSS]   audio SLB: on (auto)  detail_anchor={detail_anchor!r}")
+        print(f"[CLSS]   audio_anchor={audio_anchor!r}")
+        print(f"[CLSS]   open_loop={open_loop!r}  object_identity={object_identity!r}")
         print(f"[CLSS]   clss_config={dataclasses.asdict(clss_config)}")
         print(f"[CLSS]   noise.seed={getattr(noise, 'seed', 'unknown')}  "
               f"guider.cfg={getattr(guider, 'cfg', getattr(guider, 'cfg_scale', 'unknown'))}  "
@@ -531,25 +571,24 @@ class CLSSStreamingSampler:
               f"values={[round(float(s), 4) for s in sigmas]}")
         print("[CLSS] ═════════════════════════════════════════════════════════════")
 
-        # ── Length-derived chunk count (reference build_chunk_schedule parity) ──
-        # The chunk count is a function of the requested duration, not a knob:
-        # total px = duration·fps → total lf via the causal mapping lf=(px−1)/8+1
-        # → chunks = ceil(total_lf / new_lf).  Rounded UP to whole chunks; the
-        # actual delivered duration is logged.
-        if length_seconds > 0.0:
-            _tmpl = latent["samples"]
-            _vid_t = (_tmpl.unbind()[0] if isinstance(_tmpl, comfy.nested_tensor.NestedTensor)
-                      else _tmpl)
-            _chunk_lf = _vid_t.shape[2]
-            _total_px = max(1, round(length_seconds * fps))
-            _total_lf = (_total_px - 1) // 8 + 1
-            num_chunks = max(1, math.ceil(_total_lf / _chunk_lf))
-            _actual_px = (num_chunks * _chunk_lf - 1) * 8 + 1
-            print(f"[CLSS] auto: num_chunks={num_chunks} from length={length_seconds:.1f}s "
-                  f"@{fps:.0f}fps ({_total_px}px → {_total_lf}lf, chunk={_chunk_lf}lf) — "
-                  f"actual={_actual_px / fps:.2f}s")
+        # ── Ablation arms (off by default — off = byte-exact previous behaviour) ──
+        # open_loop: naive sliding-window baseline.  All closed-loop corrections
+        # are gated on `_open_loop` at their application sites below (re-noising
+        # forced to tau_c=0, post_process / detail anchor / std anchor skipped,
+        # audio anchor treated as 'off'); the SLB is still placed and
+        # update_buffer still runs, so telemetry stays comparable.
+        _open_loop = (open_loop == "on")
+        if _open_loop:
+            print("[CLSS S1] open_loop=on: all closed-loop corrections disabled (baseline arm)")
+            audio_anchor = "off"
+        # object_identity: decoded seam-frame grid metric — needs the VAE.
+        _obj_id = (object_identity == "on")
+        if _obj_id and vae is None:
+            print("[CLSS S1] WARNING: object_identity=on requires vae connected — "
+                  "metric disabled.  Connect the VAE output from LTXVideo Loader.")
+            _obj_id = False
 
-        # ── Auto-derived settings (length-dependent — not user knobs) ──────
+        # ── Auto-derived settings (not user knobs) ───────────────────────
         # anchor_force_every: force a bank entry roughly every quarter of the run
         # so the anchor bank actually grows on long videos (7 chunks previously
         # produced bank_size=2 with the fixed default of 5) while never anchoring
@@ -558,21 +597,6 @@ class CLSSStreamingSampler:
             _auto_anchor = max(2, min(5, math.ceil(num_chunks / 4)))
             clss_config = dataclasses.replace(clss_config, anchor_force_every=_auto_anchor)
             print(f"[CLSS] auto: anchor_force_every={_auto_anchor} (num_chunks={num_chunks})")
-        # audio_slb: short runs benefit from the frozen-tail boundary continuity;
-        # long runs showed SLB feedback runaway (RMS 0.52→0.82, high-freq 3.8×
-        # over 7 chunks).  Length decides; explicit on/off remains for A/B only.
-        if audio_slb == "auto":
-            # Previously auto-disabled beyond 4 chunks because the frozen SLB fed
-            # audio energy/DC drift forward and it compounded.  That reason is now
-            # removed: the per-chunk hard anchor to chunk-0 (RMS+DC) is applied
-            # BEFORE new_aud feeds the SLB/ref, so the fed-forward context can no
-            # longer drift.  Without the SLB, ref_audio is the only cross-chunk
-            # continuity and it is too weak (measured audio boundary cos ~0.14 over
-            # 15 chunks — audible timbral seams every chunk).  Keep the SLB ON at
-            # any length; the anchor keeps it stable.
-            audio_slb = "on"
-            print(f"[CLSS] auto: audio_slb=on (energy anchor makes the SLB safe at any "
-                  f"length; provides cross-chunk audio content continuity)")
 
         samples = latent["samples"]
 
@@ -654,6 +678,12 @@ class CLSSStreamingSampler:
                   f"chunk1={new_af}af  chunks2+={new_af_cont}af  overlap={audio_overlap_af}af  "
                   f"total={new_af + (num_chunks - 1) * new_af_cont}af for "
                   f"{(num_chunks * new_lf - 1) * 8 + 1}px")
+            # Audio SLB is always on: the per-chunk energy anchor (applied before
+            # new_aud feeds the SLB/ref) keeps the fed-forward context from
+            # drifting, and without the SLB, ref_audio alone is too weak for
+            # cross-chunk audio continuity.  ref_audio length = the audio overlap.
+            print(f"[CLSS] audio SLB: on (auto) — {audio_overlap_af}f, cross-chunk "
+                  f"audio continuity")
         else:
             B_a = C_a = new_af = freq = audio_overlap_af = new_af_cont = 0
 
@@ -706,6 +736,7 @@ class CLSSStreamingSampler:
 
         # Tracking state for per-chunk coherence metrics (§items 1,2,6)
         _s1_prev_last:       torch.Tensor | None = None  # [B, C_v, H, W] last corrected frame
+        _s1_prev_tail:       torch.Tensor | None = None  # [B, C_v, ≤2, H, W] last frames (object_identity seam decode only)
         _s1_vid_std_ref:     float | None = None          # chunk-0 global video std (creep anchor)
         _prev_scene_idx:     int | None = None            # scene of the previous chunk (stat-anchor re-baseline)
         _s1_band_ref:        tuple[float, float] | None = None  # scene-first (E_low, E_high) detail-band reference
@@ -723,6 +754,7 @@ class CLSSStreamingSampler:
             "vid_ident": [],  # identity_sim vs nearest anchor (content drift)
             "vid_intra": [],  # intra-chunk sim — repetition signal (0.73 healthy, 0.97+ = looping)
             "vid_bnd":   [],  # video boundary_sim (chunk seam)
+            "vid_obj":   [],  # decoded seam 8x8 grid-cell cosine MEAN (object_identity only)
             "vid_hf":    [],  # high-frequency energy share (detail retention)
             "vid_origin": [], # per-chunk floor of frame-vs-scene-first similarity (drift)
             "aud_env":   [],  # chunk-to-chunk loudness-gesture correlation (repetition)
@@ -878,6 +910,10 @@ class CLSSStreamingSampler:
             # schedule counts chunks THAT HAVE an overlap (first chunk has none).
             if has_slb:
                 _tau_c_v = _tau_c_eff(clss_config.tau_c, _VIDEO_TAU_C_CEILING, chunk_idx - 1)
+                if _open_loop:
+                    # Baseline arm: no calibrated re-noising — the SLB is placed
+                    # FROZEN (strength 1.0), exactly the existing tau_c=0 path.
+                    _tau_c_v = 0.0
                 lat_vid, mask_vid = LTXVAddGuide.replace_latent_frames(
                     lat_vid, mask_vid,
                     guiding_latent=clss_state._overlap_latent.to(device),
@@ -886,6 +922,11 @@ class CLSSStreamingSampler:
                 )
                 print(f"[CLSS S1]   video tau_c_eff={_tau_c_v:.4f} (base={clss_config.tau_c}, "
                       f"ceiling={_VIDEO_TAU_C_CEILING})")
+
+            # §2.5 Dynamic anchor bank: telemetry-only (identity tracking in the
+            # end-of-chunk block), NOT wired into conditioning.  (The nudge
+            # experiment was removed after validation runs; see
+            # clss_experimental_changes.patch.)
 
             # i2v: in-place first-frame conditioning — the canonical LTX i2v path.
             # ComfyUI's LTXVAddGuide itself uses replace_latent_frames for frame_idx=0;
@@ -912,20 +953,18 @@ class CLSSStreamingSampler:
             # §2.5 Dynamic anchor bank: telemetry-only (identity tracking in the
             # end-of-chunk block), NOT wired into conditioning.
             #
-            # An in-place anchor NUDGE was tried (retrieve the best non-redundant
-            # anchor, replace_latent_frames at the first new frame, strength 0.35)
-            # and REVERTED 2026-07-21: it injected an old keyframe into every
-            # chunk's first new frame and produced visible content morphing /
-            # "jump in time" — including chunks pulled BACK to an earlier anchor
-            # than a previous chunk had already moved past (log: chunk 7 nudged to
-            # anchor@frame35 after chunk 5 used anchor@frame47).  Retrieval picks
-            # the LEAST-similar non-redundant anchor, so the nudge actively drags
-            # content toward whatever the scene has moved away from — the opposite
-            # of continuity.  The reference library's append-style
-            # VideoConditionByKeyframeIndex would corrupt AV audio (see the i2v
-            # guide note above); the in-place replace variant morphs video.  No
-            # safe anchor-conditioning path is currently known, so the bank stays
-            # diagnostic-only until one is designed and validated.
+            # History: an in-place anchor nudge at strength 0.35 was REVERTED
+            # 2026-07-21 after visible content morphing / "jump in time"
+            # (chunk 7 nudged to anchor@frame35 after chunk 5 used anchor@frame47).
+            # The failure was recorded as "retrieval picks the LEAST-similar
+            # anchor" — but the library retrieve() has returned the MOST-similar
+            # non-redundant anchor since the first commit (verified 2026-08-05),
+            # so the July diagnosis was wrong and the correct wiring was never
+            # tested.  A 2026-08-05 retry (most-similar, strength 0.20) was
+            # implemented and then removed again pending isolated validation;
+            # it lives in clss_experimental_changes.patch.  The append-style
+            # VideoConditionByKeyframeIndex alternative corrupts AV audio (see
+            # the i2v guide note above) and remains off the table.
 
             if aud_tmpl is not None:
                 # Audio latent covers same temporal span as video (overlap + new frames).
@@ -936,59 +975,54 @@ class CLSSStreamingSampler:
                 # [B, 1, T, 1] broadcasts correctly through reshape_mask → [B, C, T, freq]
                 mask_aud = torch.ones(B_a, 1, chunk_af, 1, device=device)
 
-                # Audio SLB: place previous chunk's overlap-time audio at mask=tau_c.
+                # Audio SLB (always on): place previous chunk's overlap-time audio
+                # at mask=tau_c.
                 # Required: model_base.process_timestep multiplies audio_denoise_mask×sigma
                 # → per-token a_timestep.  Without tau_c here, overlap audio tokens get
                 # full-sigma a_timestep → a2v cross-attention treats them as maximally
                 # noisy even though video SLB is near-clean → video discontinuity.
                 _slb_ctx_used: torch.Tensor | None = None   # what was actually PLACED (for the honored check)
-                if has_aud_slb and audio_slb == "on":
+                if has_aud_slb:
                     slb = audio_slb_latent.to(device)
                     n   = min(audio_overlap_af, slb.shape[2], chunk_af)
-                    _tau_c_a = _tau_c_eff(clss_config.tau_c, _AUDIO_TAU_C_CEILING, chunk_idx - 1)
+                    _tau_c_a = _tau_c_eff(clss_config.tau_c * _AUDIO_TAU_C_BASE_MULT,
+                                          _AUDIO_TAU_C_CEILING, chunk_idx - 1)
                     _slb_ctx = slb[:, :, :n]
-                    if audio_ctx_flatten == "on":
-                        _slb_ctx, _fg_lo, _fg_hi = _flatten_audio_env(_slb_ctx)
-                        print(f"[CLSS S1]   audio SLB env-flattened: gain=[{_fg_lo:.3f}, "
-                              f"{_fg_hi:.3f}] (loudness arc removed from context; "
-                              f"content kept, output audio untouched)")
+                    _slb_ctx, _fg_lo, _fg_hi = _flatten_audio_env(_slb_ctx)
                     lat_aud[:, :, :n]  = _slb_ctx
                     mask_aud[:, :, :n] = _tau_c_a
                     _slb_ctx_used = _slb_ctx.detach().cpu()
                     print(f"[CLSS S1]   audio SLB: {n}f  tau_c_eff={_tau_c_a:.4f} "
-                          f"(base={clss_config.tau_c}, ceiling={_AUDIO_TAU_C_CEILING})  "
-                          f"mean={_slb_ctx.float().mean():.4f}")
-                elif has_aud_slb:
-                    print(f"[CLSS S1]   audio SLB: OFF (reference design — overlap audio "
-                          f"regenerated at mask=1 and dropped; continuity via ref_audio only)")
+                          f"(base={clss_config.tau_c * _AUDIO_TAU_C_BASE_MULT:.3f}, "
+                          f"ceiling={_AUDIO_TAU_C_CEILING})  "
+                          f"mean={_slb_ctx.float().mean():.4f}  "
+                          f"env-flatten gain=[{_fg_lo:.3f}, {_fg_hi:.3f}]")
 
                 # ref_audio at negative RoPE positions: temporal context for what
                 # preceded this chunk (av_model.py line 708 prepends ref tokens).
                 if has_aud_ref:
-                    ref_slb   = audio_overlap_latent.to(device)   # [B, C, T_ov, freq]
+                    ref_slb   = audio_overlap_latent.to(device)   # [B, C_a, T_ov, freq]
                     # Faithful to reference pipeline.py: the previous chunk's
                     # pre-overlap audio tail is the negative-RoPE conditioning,
-                    # passed clean and full-length.
+                    # passed at full length, envelope-flattened (always on —
+                    # context only; protects the video side, see
+                    # _flatten_audio_env docstring).
                     #
-                    # DEAD-END LOG (2026-07-23, do NOT re-add): every attempt to
-                    # break the audio metronome by PERTURBING this reference was
-                    # tested live on the user's ears and FAILED identically —
+                    # DEAD-END LOG (2026-07-23, as ANTI-LOOP levers — do NOT
+                    # re-add for that purpose): every attempt to break the
+                    # audio metronome by PERTURBING this reference was tested
+                    # live on the user's ears and FAILED identically —
                     #   • ref-length decay (0.85^chunk, floored)      → loop unchanged
                     #   • white-noise blend (ramp 0.05/chunk to a cap) → loop unchanged
                     #                                                    + injected HF hiss
                     #   • env-flatten                                  → loop unchanged
                     # The env_corr metronome still locks (→0.9) the chunk the ref
-                    # reaches full window, independent of these.  The loop is a
-                    # structural property of chunked autoregression over a static
-                    # prompt; perturbing the reference only adds noise energy the
-                    # model renders as drone/hiss.  Only a non-chunked re-render
-                    # (VRAM-blocked) can address the loop — so the ref is now clean.
-                    if audio_ctx_flatten == "on":
-                        # Legacy env-flatten lever (off by default; another de-lock
-                        # experiment — see dead-end log above).
-                        ref_slb, _fg_lo, _fg_hi = _flatten_audio_env(ref_slb)
-                        print(f"[CLSS S1]   audio ref env-flattened: gain=[{_fg_lo:.3f}, "
-                              f"{_fg_hi:.3f}]")
+                    # reaches full window, independent of these.  The loop's
+                    # carrier is the near-verbatim SLB tail, addressed instead by
+                    # the raised audio tau_c schedule (see _AUDIO_TAU_C_BASE_MULT).
+                    ref_slb, _fg_lo, _fg_hi = _flatten_audio_env(ref_slb)
+                    print(f"[CLSS S1]   audio ref env-flattened: gain=[{_fg_lo:.3f}, "
+                          f"{_fg_hi:.3f}]")
                     b_r, c_r, t_r, f_r = ref_slb.shape
                     ref_tokens = ref_slb.permute(0, 2, 1, 3).reshape(b_r, t_r, c_r * f_r)
                     ref_audio_dict = {"tokens": ref_tokens}
@@ -1116,7 +1150,9 @@ class CLSSStreamingSampler:
                       f"||delta||={_delta.float().norm().item():.4f}  "
                       f"||out_diff||={_out_diff_norm:.4f}  tail={_n_tail}f)")
 
-            corrected = clss_state.post_process(new_vid)
+            # open_loop baseline: skip AdaIN + spectral shrinkage (post_process)
+            # but keep update_buffer below so SLB/anchor telemetry still runs.
+            corrected = new_vid if _open_loop else clss_state.post_process(new_vid)
 
             # ── Detail-band anchor (scene-first-referenced, symmetric, capped) ──
             # Root cause of the reported progressive detail loss, grounded in the
@@ -1144,7 +1180,7 @@ class CLSSStreamingSampler:
             _e_low = float(_da_low.pow(2).mean())
             _e_high = float(_da_high.pow(2).mean())
             _hf_share = _e_high / max(_e_low + _e_high, 1e-12)
-            if detail_anchor == "on":
+            if detail_anchor == "on" and not _open_loop:  # open_loop baseline: no detail anchor
                 if _s1_band_ref is None:
                     _s1_band_ref = (_e_low, _e_high)
                     print(f"[CLSS S1]   detail anchor: reference captured "
@@ -1207,17 +1243,20 @@ class CLSSStreamingSampler:
             # of chunk-0, and only partially (blend 0.5) — enough to stop the monotonic
             # creep without flattening legitimate per-scene contrast changes.  Mean is
             # left untouched (it carries scene evolution).
-            if _s1_vid_std_ref is None:
-                _s1_vid_std_ref = corrected.float().std().item()
-            else:
-                _cur_vstd = corrected.float().std().item()
-                _ratio = _s1_vid_std_ref / max(_cur_vstd, 1e-6)
-                if _ratio < 0.96 or _ratio > 1.04:      # only when drift exceeds ±4%
-                    _g_v = 1.0 + 0.5 * (_ratio - 1.0)   # partial pull toward chunk-0
-                    _m = corrected.float().mean()
-                    corrected = ((corrected.float() - _m) * _g_v + _m).to(corrected.dtype)
-                    print(f"[CLSS S1]   video std anchor: {_cur_vstd:.4f}→"
-                          f"{corrected.float().std().item():.4f} (ref={_s1_vid_std_ref:.4f}, g={_g_v:.4f})")
+            # open_loop baseline: the whole std-anchor block (ref capture +
+            # correction) is skipped — the anchor is a closed-loop correction.
+            if not _open_loop:
+                if _s1_vid_std_ref is None:
+                    _s1_vid_std_ref = corrected.float().std().item()
+                else:
+                    _cur_vstd = corrected.float().std().item()
+                    _ratio = _s1_vid_std_ref / max(_cur_vstd, 1e-6)
+                    if _ratio < 0.96 or _ratio > 1.04:      # only when drift exceeds ±4%
+                        _g_v = 1.0 + 0.5 * (_ratio - 1.0)   # partial pull toward chunk-0
+                        _m = corrected.float().mean()
+                        corrected = ((corrected.float() - _m) * _g_v + _m).to(corrected.dtype)
+                        print(f"[CLSS S1]   video std anchor: {_cur_vstd:.4f}→"
+                              f"{corrected.float().std().item():.4f} (ref={_s1_vid_std_ref:.4f}, g={_g_v:.4f})")
             mu_post   = corrected.mean().item()
             std_post  = corrected.std().item()
             clss_state.update_buffer(corrected)
@@ -1237,6 +1276,32 @@ class CLSSStreamingSampler:
                 _trend["vid_bnd"].append(_bnd)
             else:
                 print(f"[CLSS S1]   boundary_sim=N/A(first)  intra_chunk_sim={_intra:.4f}")
+            # §object_identity: spatially-resolved seam identity (DECODED pixel frames).
+            # Decodes a short clip around the seam — last ≤2 corrected latent frames of
+            # the previous chunk + first ≤2 of this chunk — via vae.decode, the exact
+            # path the workflow's VAEDecode node uses (LTXV latent format has no
+            # process_out normalization; sampler-space latents are decoder-ready).
+            # LTXV is a causal 3D VAE: latent frame 0 → 1 px frame, every subsequent
+            # latent frame → 8 px frames, so with _kp previous frames the two px frames
+            # straddling the seam are at indices 8*(_kp-1) and 8*(_kp-1)+1.  The metric
+            # is a diagnostic: a decode failure must never kill a generation, so it is
+            # caught and the chunk is skipped.
+            if _obj_id and _s1_prev_tail is not None:
+                try:
+                    _kp = _s1_prev_tail.shape[2]
+                    _kn = min(2, corrected.shape[2])
+                    _seam_clip = torch.cat(
+                        [_s1_prev_tail, corrected[:, :, :_kn].cpu()], dim=2)
+                    _px = vae.decode(_seam_clip)   # [B, T_px, H_px, W_px, C], [0,1]
+                    _si = 8 * (_kp - 1)
+                    _obj_mean, _obj_min = _grid_cell_cos(_px[0, _si], _px[0, _si + 1])
+                    print(f"[CLSS S1]   object_identity: cell_cos mean={_obj_mean:.3f} "
+                          f"min={_obj_min:.3f} (8x8 grid, decoded)")
+                    _trend["vid_obj"].append(_obj_mean)
+                    del _px, _seam_clip
+                except Exception as _e:
+                    print(f"[CLSS S1]   object_identity: seam decode FAILED "
+                          f"({type(_e).__name__}: {_e}) — metric skipped for this chunk")
             _trend["vid_std"].append(std_post)
             # §item-6: identity-retention — cosine vs nearest bank anchor.
             # Comparing vs the NEAREST anchor (not always chunk-1) separates within-scene
@@ -1269,6 +1334,9 @@ class CLSSStreamingSampler:
                 else:
                     print(f"[CLSS S1]   identity_sim=N/A (bank empty)")
             _s1_prev_last = corrected[:, :, -1].cpu()
+            # object_identity: keep the last ≤2 corrected frames for next chunk's
+            # seam decode (None when the metric is off — zero cost).
+            _s1_prev_tail = corrected[:, :, -2:].detach().cpu() if _obj_id else None
             # Per-frame adjacent sim for the last chunk — locates visual breaks precisely.
             if chunk_idx == num_chunks - 1 and corrected.shape[2] > 1:
                 _adj = [_frame_cos(corrected[:, :, i], corrected[:, :, i + 1])
@@ -1295,17 +1363,16 @@ class CLSSStreamingSampler:
                       f"nan={aud_out.isnan().any().item()} inf={aud_out.isinf().any().item()}")
                 print(f"[CLSS S1]   audio acc: new_aud af=[{aud_acc_start}:{aud_acc_end}] "
                       f"({new_aud.shape[2]}f kept, {aud_drop}f overlap-time dropped)")
-                # SLB-honored check: with tau_c=0.05, the SLB frames should survive nearly
-                # unchanged → cosine ≥ 0.97.  Low value → noise_mask not applied → wrong diag.
-                if not is_first and audio_slb_latent is not None and audio_overlap_af > 0:
-                    # Compare against what was PLACED (env-flattened when
-                    # audio_ctx_flatten is on), not the raw saved tail —
-                    # otherwise the flatten reads as a false SLB violation.
-                    _slb_expect = (_slb_ctx_used if _slb_ctx_used is not None
-                                   else audio_slb_latent)
-                    _slb_sim = _aud_cos(_slb_expect.to(device),
+                # SLB-honored check: compares the overlap audio AS PLACED
+                # (env-flattened) against the denoised output.  With the raised
+                # audio tau_c schedule (≈0.15→0.28) the overlap is deliberately
+                # re-noised, so honored reads well below the old ≥0.97 — that is
+                # the mechanism working.  A near-zero reading = mask not applied.
+                if not is_first and _slb_ctx_used is not None and audio_overlap_af > 0:
+                    _slb_sim = _aud_cos(_slb_ctx_used.to(device),
                                         aud_out[:, :, :audio_overlap_af])
-                    print(f"[CLSS S1]   audio SLB honored: {_slb_sim:.4f} (expect ≥0.97)")
+                    print(f"[CLSS S1]   audio SLB honored: {_slb_sim:.4f} "
+                          f"(re-noised by design at tau_c={_tau_c_a:.2f}; ~0 = mask failure)")
                     _trend["aud_slb"].append(_slb_sim)
                 # Per-channel max-abs for first 8 frames (diagnose onset spike in chunk 1)
                 with torch.no_grad():
@@ -1516,14 +1583,14 @@ class CLSSStreamingSampler:
                         _tail_cur if _s1_audio_tail is None
                         else torch.cat([_s1_audio_tail, _tail_cur], dim=2)
                     )
-                    _ref_keep = ov + max(int(audio_ref_af), 0)
+                    _ref_keep = 2 * ov   # ov for the next SLB + ov of ref (= audio overlap)
                     if _s1_audio_tail.shape[2] > _ref_keep:
                         _s1_audio_tail = _s1_audio_tail[:, :, -_ref_keep:]
                     _s1_audio_tail = _s1_audio_tail.clone()
                     _tail_lf = _s1_audio_tail.shape[2]
                     pre_ov_end = max(0, _tail_lf - ov)   # tail's last ov frames = next overlap
-                    if pre_ov_end > 0 and int(audio_ref_af) > 0:
-                        _ref_start = max(0, pre_ov_end - int(audio_ref_af))
+                    if pre_ov_end > 0:
+                        _ref_start = max(0, pre_ov_end - ov)
                         audio_overlap_latent = _s1_audio_tail[:, :, _ref_start:pre_ov_end].clone()
                         print(f"[CLSS S1]   audio ref saved: {audio_overlap_latent.shape[2]}f "
                               f"(tail[{_ref_start}:{pre_ov_end}], tail_len={_tail_lf})  "
@@ -1592,13 +1659,15 @@ class CLSSStreamingSampler:
         print(_trend_line("vid_ident",  _trend["vid_ident"], want=0.85, tol=0.0, start=2))  # content drift
         print(_trend_line("vid_intra", _trend["vid_intra"], want=0.90, tol=0.0, hi_good=False))  # repetition (ceiling, not floor)
         print(_trend_line("vid_bnd",    _trend["vid_bnd"],   want=0.95, tol=0.0, start=2))  # seam
+        if _trend["vid_obj"]:
+            print(_trend_line("vid_obj", _trend["vid_obj"], want=0.85, tol=0.0, start=2))  # decoded seam grid-cell identity (object_identity)
         print(_trend_line("vid_hf",     _trend["vid_hf"],    want=None, tol=0.03))          # detail (HF energy share)
         print(_trend_line("vid_origin", _trend["vid_origin"], want=None, tol=0.10))         # drift vs scene-first
         if _trend["aud_env"]:
             print(_trend_line("aud_env", _trend["aud_env"],  want=None, tol=0.30, start=2))  # loudness-gesture repetition
         print(_trend_line("aud_rms",    _trend["aud_rms"],   want=None, tol=0.10))          # energy stability
         print(_trend_line("aud_bnd",    _trend["aud_bnd"],   want=0.80, tol=0.0, start=2))  # audio seam
-        print(_trend_line("aud_slb",    _trend["aud_slb"],   want=0.97, tol=0.0, start=2))  # continuity mech
+        print(_trend_line("aud_slb",    _trend["aud_slb"],   want=0.60, tol=0.0, start=2))  # continuity mech (re-noised by design; want = mask-applied floor)
         print(_trend_line("aud_wc",     _trend["aud_wc"],    want=0.80, tol=0.0))           # intra-chunk audio
         print(_trend_line("aud_hf",     _trend["aud_hf"],    want=None, tol=0.50, start=2))  # spectral drift
         if _trend["g_slb"]:
@@ -1651,7 +1720,7 @@ class CLSSStreamingSampler:
         # chunks) — the model replays one motion/loudness arc per chunk,
         # phase-locked to the chunk grid.  Clustered values here = metronome;
         # scattered = organic variety.  This is the metric that judges
-        # anti-repetition experiments (audio_ctx_flatten etc.) at a glance.
+        # anti-repetition experiments at a glance.
         def _lock_line(name, vals):
             if len(vals) < 4:
                 return f"    {name}: {vals} (too few chunks to judge)"
