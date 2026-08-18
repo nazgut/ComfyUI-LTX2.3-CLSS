@@ -71,7 +71,7 @@
   },
   "10": {
     "inputs": {
-      "value": 121
+      "value": 409
     },
     "class_type": "PrimitiveInt",
     "_meta": {
@@ -311,7 +311,7 @@
   },
   "30": {
     "inputs": {
-      "sigmas": "0.909375, 0.725, 0.421875, 0.0"
+      "sigmas": "0.909375, 0.725, 0.55, 0.421875, 0.25, 0.0"
     },
     "class_type": "ManualSigmas",
     "_meta": {
@@ -409,7 +409,7 @@
   },
   "58": {
     "inputs": {
-      "prompts": "A tiny, anthropomorphic hedgehog wearing a miniature baker's hat is carefully decorating a large, multi-tiered birthday cake in a cozy, sun-drenched cottage kitchen. He stands on his tiptoes, his small paws gently placing a single, glowing, golden sprinkle on the top tier, a look of intense concentration on his face. The kitchen is warm and cluttered with mixing bowls, a sack of flour, and a copper kettle. A soft, diffused sunlight streams through a leaded glass window, casting long, warm shadows across the wooden floor. The camera is a medium shot, slightly low-angled to emphasize the cake's height, and holds steady. A small bluebird chirps from the windowsill.\n---\nThe hedgehog steps back, admiring his work with a proud, wide-eyed expression, a single tear of joy welling in his eye. Suddenly, he loses his balance on a stray drop of batter, his arms flailing as he stumbles backward onto the soft, flour-dusted floor with a quiet puff of white dust. The bluebird lets out a sharp, startled chirp. The camera quickly pans down to capture his fall, moving from a medium shot to a close-up of his surprised face as he lands. The lighting remains warm, but the cloud of flour momentarily catches the sunlight, creating a sparkling effect in the air around him.\n---\nStruggling back to his feet, the little baker is shocked to see a large, clumsy paw reaching from off-screen and swiping the entire top tier of the cake. A towering, but equally tiny, moose chef in a stained apron is revealed, his mouth full of frosting as he tries to look innocent. The hedgehog shakes his head in dismay, his ears drooping. The camera is a medium two-shot, capturing the moment from the moose's back as he leans over the table, then cutting to a close-up of the hedgehog’s horrified reaction. The lighting shifts slightly, becoming a little more dramatic with a shadow falling over the hedgehog’s face.\n---\nThe moose, realizing his mistake, offers a sheepish smile and a small, velvet bag of magical ingredients as an apology, his massive hooves surprisingly gentle. The hedgehog's expression softens from anger to curiosity as he peers into the bag, a single shimmering star-dust mote floating out. He takes a hesitant step forward, gesturing for the moose to help him. The camera slowly zooms in from a wide shot of the kitchen to a tight over-the-shoulder shot of the hedgehog looking into the bag, the light from the dust illuminating his face. The background fades into a warm, magical blur.\n---\nThe hedgehog and the moose are now working side-by-side, the hedgehog directing the moose as the latter carefully places a new golden star on the repaired cake's top. They look at each other and share a triumphant smile, a true friendship born from the mishap. The bluebird flies down and lands on the moose's antler. The camera pulls back and upwards in a slow, gentle crane shot, revealing the entire scene in the warm kitchen, the perfect cake at the center. The natural light from the window flares softly, creating a heartwarming, wholesome glow over the two friends.",
+      "prompts": "From the driver's first-person perspective, a classic red vintage Ferrari convertible hugs the winding Pacific Coast Highway, its glossy hood and chrome grille leading the view as the car glides through a gentle right-hand curve. The driver's tanned hands grip the black leather steering wheel at ten and two, fingers tapping rhythmically as the asphalt rushes beneath the open hood. The bright white dashboard gauges and the wind buffeting the windshield frame fill the immediate foreground, while the steering wheel slightly rotates with each turn. Through the curved glass, the deep blue Pacific Ocean sparkles intensely to the right, with whitecaps breaking against scattered rocks just offshore, while dry golden-brown hills rise steeply on the left, dotted with green coastal scrub. A fixed, eye-level POV camera is mounted just behind the steering wheel, looking straight ahead over the hood, perfectly framing the road's center line as it unfurls toward the horizon. Late afternoon golden hour light pours through the windshield, casting warm orange and yellow glare across the polished chrome and leather, with long shadows stretching from the front wheels. Audio is radio song playing classic 90' song in high quality with no artifacts and no noise.",
       "max_length": 512,
       "clip": [
         "47",
@@ -426,7 +426,9 @@
       "tau_c": 0.05,
       "beta": 0.4,
       "overlap": 8,
-      "noise_temporal_corr": false
+      "noise_temporal_corr": 0.0,
+      "measure_g": "off",
+      "shrinkage": "on"
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -440,7 +442,7 @@
       "modality_scale": 1,
       "rescale": 0.7,
       "video_stg": 1,
-      "audio_stg": 1,
+      "audio_stg": 0,
       "stg_block": 28,
       "model": [
         "3",
@@ -494,6 +496,8 @@
     "inputs": {
       "frames_per_chunk": 0,
       "s2_overlap": 0,
+      "audio_refine": "on",
+      "audio_join_sigma": 0.55,
       "fps": [
         "12",
         0
@@ -541,7 +545,9 @@
       "tau_c": 0.05,
       "beta": 0.4,
       "overlap": 8,
-      "noise_temporal_corr": 0.3
+      "noise_temporal_corr": 0.3,
+      "measure_g": "off",
+      "shrinkage": "on"
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -550,13 +556,17 @@
   },
   "100": {
     "inputs": {
-      "num_chunks": 5,
+      "num_chunks": 4,
       "fps": [
         "12",
         0
       ],
       "detail_anchor": "on",
       "audio_anchor": "rms_only",
+      "ref_audio_seconds": 8.0,
+      "audio_slb_tau_mult": 1.0,
+      "audio_shift_mult": 0.0,
+      "object_identity": "on",
       "guider": [
         "94",
         0
@@ -588,7 +598,10 @@
       "vae": [
         "2",
         0
-      ]
+      ],
+      "video_slb_tau_mult": 1.0,
+      "open_loop": "off",
+      "auto_seam_pin": "off"
     },
     "class_type": "CLSSStreamingSampler",
     "_meta": {

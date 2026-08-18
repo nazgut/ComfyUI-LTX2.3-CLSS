@@ -18,7 +18,7 @@ CLSS treats the chunk hand-off as a **feedback loop** and controls it. Between c
 - **Frequency-band soft shrinkage** — stops spectral energy from accumulating in the latent
 - **Dynamic anchor bank** — long-range identity tracking with scene-change-triggered commits and forced periodic insertion
 - **Two-band spatial detail anchor** — closes the progressive-softening channel the one-sided shrinkage leaves open
-- **Per-chunk overlap phase-jitter** — cycles the chunk overlap through [full, half, ¾] so no two consecutive chunks share a window shape; eliminates the fixed-point repetition ("metronome") of chunked autoregressive audio *chunk-natively*, at any length
+- **Hot audio SLB re-noise schedule** — the audio overlap is re-noised on a 3× schedule (τc ≈ 0.15→0.28, ceiling 0.35) with envelope-flattened context; breaks the fixed-point repetition ("metronome") of chunked autoregressive audio *chunk-natively*, at any length. (A per-chunk overlap phase-jitter lever was built against the same failure and removed: it scattered the peak but fought the SLB's structural assumptions.)
 
 All of it is grounded in a **linear stability analysis** of the feedback loop in latent space (ρ_loop = 0.57), with per-chunk telemetry that localizes every drift event in wall-clock time.
 
@@ -67,8 +67,8 @@ See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-ch
 |---|---|
 | **CLSS Config** | CLSS hyperparameters (τc, β, overlap, …) |
 | **CLSS Scene Prompts** | Per-scene prompts encoded into flat CONDITIONING |
-| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, overlap phase-jitter, seeded noise, full telemetry |
-| **CLSS Stage 2** | 2× refinement pass (3-step distilled LoRA, per-window detail anchor, frozen audio) |
+| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, audio SLB + ref_audio continuity (length via `ref_audio_seconds`), per-modality audio shift (auto by default), seeded noise, full telemetry |
+| **CLSS Stage 2** | 2× refinement pass (3-step distilled LoRA, per-window detail anchor, joined audio refinement) |
 | **CLSS AV Guider / V2** | Split per-modality CFG (+ modality scaling and STG in V2) |
 
 ```
@@ -78,6 +78,33 @@ CLSSConfig + CLSSStreamingSampler → LTXVSeparateAVLatent → VAE Decode
 ```
 
 The nodes interoperate with upstream ComfyUI LTXV nodes (`comfy_extras.nodes_lt`, `nodes_custom_sampler`).
+
+### Audio latent scale
+
+The LTX-2 audio VAE's normalizer is calibrated so **real audio sits at unit variance**
+(measured over four real tracks: overall latent std 0.98–1.26, per-frequency-bin std flat
+at 1.00). Generated audio falls short of that, and how far short predicts how bad it
+sounds — a 104 s single-window soundtrack draft measured std 0.48, bandwidth 3.1 kHz and
+L/R correlation 1.00000 (literally mono), while the strongest per-chunk run on these
+measures reached std 0.84,
+6.1 kHz and real stereo. Half scale in a log-mel space means quiet (−31.6 dBFS against
+−21…−16 for the reference tracks) and low-passed far below the 8 kHz mel ceiling. The VAE
+is not at fault: real music round-trips through it with bandwidth and stereo intact.
+
+Note what is *not* wrong: the draft's dynamic range (8.1 dB) already exceeds real music's
+(4.3–6.3 dB), and its log-mel contrast (1.35) exceeds real music's (1.00). The deficit is
+level and treble, not contrast — so scaling the latent's variance up is the wrong lever
+and is deliberately not offered.
+
+Measure any take with `python simulations/audio_latent_probe.py FILE --reference` — audio
+VAE only, CPU, no transformer, so it runs while ComfyUI holds the GPU.
+
+A latent-statistics repair was tried and **rejected** (2026-08-10). Shifting the audio
+latent's per-(channel, bin) mean toward a real-music profile raised every metric I was
+watching — bandwidth ro99 3141 → 4477 Hz, level +4 dB — and sounded like noise on a live
+run. The added "bandwidth" was a broadband noise bed (energy above 4 kHz went 0.22% →
+1.31%) while the loudness envelope collapsed to 2.4 dB. There is no post-hoc fix for a
+draft generated past the wall; generate inside it.
 
 ## Repository layout
 
