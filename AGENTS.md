@@ -15,7 +15,6 @@ closed-loop corrections that fight exposure-bias drift **without modifying trans
 
 - **§2.1** calibrated context re-noising (`tau_c`, default 0.05)
 - **§2.3** EMA per-channel AdaIN drift correction (`beta`, default 0.4)
-- **§2.4** frequency-band soft shrinkage
 - **§2.5** dynamic anchor bank (long-range identity tracking)
 - Two-band spatial detail anchor; hot audio SLB re-noise schedule (3× `tau_c`, ceiling 0.35)
   kills the audio "metronome" **at 16-lf chunks (the regime where the lock was ear-confirmed);
@@ -23,8 +22,9 @@ closed-loop corrections that fight exposure-bias drift **without modifying trans
   (tau_mult=1.0 + ref 8s + audio_stg=0) is free of the gesture by ear: the audible failure
   there is WIND (broadband airy noise), see the split section below** — the per-chunk overlap
   phase-jitter lever was built and removed (it fought the SLB's structural assumptions);
-  cross-chunk audio content context is the SLB + `ref_audio` at negative RoPE, length knob
-  `ref_audio_seconds` on the sampler
+  cross-chunk audio content context is the SLB + `ref_audio` at negative RoPE (fixed
+  one-overlap window — the `ref_audio_seconds` knob was removed 2026-08-19; §2.4
+  frequency-band soft shrinkage was removed the same day: no purpose)
 
 Audio and video are jointly modelled; audio needs higher CFG (~7) than video (~4), and audio
 drift is a recurring failure mode (see the extensive per-input tooltips in `nodes.py`).
@@ -60,16 +60,30 @@ arms, wind continuation), used to calibrate the simulations and corrections.
   longer soundtracks need chained ≤20 s drafts via upstream `LTXVReferenceAudio` (ref tokens at
   negative RoPE, av_model.py:686-709) + `LatentConcat` on the audio latents. Keep Stage-2's auto
   chunking under 60 lf for the same reason (53 lf at current budget — fine).
+- **The sampler AUTO-ADJUSTS the per-chunk window to the wall (2026-08-22).** `CLSSStreamingSampler`
+  used to only WARN when overlap+new exceeded ~20 s — the user's 121-px (5 s) chunks worked, longer
+  chunk windows broke (the 409-px production config sits right ON the 20.0 s edge). Now the window
+  is enforced automatically (`_ROPE_WALL_S`/`_ROPE_WALL_MARGIN_S`/`_MIN_OVERLAP_LF` in nodes.py):
+  (1) the overlap is clamped down so overlap+new ≤ 19.5 s (the user's chunk length and chunk count
+  are preserved, only the SLB context shrinks); (2) if even a zero overlap exceeds the wall (one
+  chunk alone > ~19.5 s), each chunk is AUTO-SPLIT into the fewest uniform sub-chunks that fit —
+  any requested length works. The per-chunk plan (`_chunk_plan`) feeds video/audio new-lengths,
+  cumulative noise-slice positions and the SLB/ref ledger; `clss_config.overlap_latent_frames` is
+  replaced so `update_buffer` stores exactly what each chunk places. At the production 409-px/8-lf
+  config the overlap is clamped 8→6 (window 19.3 s). Stage 2's AUTO chunking is likewise capped by
+  the wall (16 = max auto s2_overlap); a manual over-wall `frames_per_chunk` is kept but loudly
+  warned.
 
 ## Repository layout
 
 ```
-nodes.py              # all 6 ComfyUI node implementations (~2700 lines)
+nodes.py              # all 7 ComfyUI node implementations (~3450 lines)
 __init__.py           # sys.path injection + ComfyUI node-mapping exports
 workflow/             # exactly two canonical workflows: i2v_LTX_CLSS.json and
                       # t2v_LTX_CLSS.json, both with the validated production config
-                      # baked in (4×52 lf, split 0.394 AUTO, ref 8 s, tau_mult 1.0, audio_stg=0,
-                      # S2 audio_refine=on, dense sigmas + join 0.55).  RULE: every
+                      # baked in (4×52 lf, split 0.394 AUTO, tau_mult 1.0, audio_stg=0,
+                      # dense sigmas; ref_audio_seconds / audio_refine removed
+                      # 2026-08-19).  RULE: every
                       # experiment copies the canonical file into its own workflow,
                       # runs it, and deletes it after the result is recorded in this
                       # file — never mutate a canonical workflow in place.
@@ -105,16 +119,24 @@ CLSSStreamingSampler(GUIDER, SAMPLER, SIGMAS, NOISE, LATENT, CLSS_CONFIG, num_ch
 ```
 
 Two-stage pipeline: Stage 1 (`CLSSStreamingSampler`) → `LTXVLatentUpsampler` (2× spatial) →
-`CLSSStage2` (chunked distilled-LoRA refinement, same SLB continuity mechanism). See the two
-files in `workflow/` for the canonical wiring (i2v with guide image, t2v text-only).
+`CLSSStage2` (chunked distilled-LoRA refinement, same SLB continuity mechanism) →
+`CLSSVideoDecodeSave` (streaming temporal-slice decode → PNG frames; never materializes the
+whole decoded video — the old VAEDecodeTiled path pre-allocated ~18 GB for a 4×52-lf run).
+See the two files in `workflow/` for the canonical wiring (i2v with guide image, t2v text-only).
 
-Optional sampler inputs worth knowing: `ref_audio_seconds` extends the clean negative-RoPE
-audio reference beyond one overlap (production value 8.0; default 0 = legacy ~2.4 s);
-`audio_slb_tau_mult` scales the hot audio SLB re-noise schedule (default 3.0 = the 16-lf
-metronome fix; production value 1.0, validated 2026-08-15 — no metronome by ear at
-4×52 lf, the audible failure is WIND, see the split section below); `audio_shift_mult`
-(default 0 = AUTO: mult = 1.844 / the connected video shift, so the audio always
-lands on the ear-validated 1.844 shift — 0.394 at 52 lf, ≈1.0 at 16 lf); 1.0 = off;
+Optional sampler inputs worth knowing: (`audio_slb_tau_mult` and the hot audio SLB
+re-noise schedule were REMOVED 2026-08-20 — the audio SLB is now placed FROZEN,
+mask=0, no tau_c on audio at all); `audio_shift_mult`
+(default 0 = AUTO: audio shift = min(the connected video shift, 1.844) — the
+EAR-VALIDATED target (2026-08-11 A/B; the 2.05/2.059 target failed live 3× —
+grainy / deflated / noise-dominant, so the 2026-08-20 "reference parity" 2.05
+ceiling was REVERTED 2026-08-22 even though the reference LTX2Scheduler runs
+2.05 with a disconnected latent); at ≤121 px frames the video shift is ≤1.844
+so the shared schedule is kept byte-identical, above it the AUDIO alone is
+pinned to 1.844 via the v3 split while the VIDEO
+keeps the token law — its motion needs the higher shift at long windows (a
+whole-schedule 2.05 cap static-killed 31-lf video, reverted 2026-08-20); manual
+values ≠1 = raw multiplier); 1.0 = off (audio uncapped);
 `video_slb_tau_mult` (default 1.0) scales the VIDEO overlap re-noise: 0.0 = frozen
 clean seam (built against the 2026-08-16 seam-clustered layout events — chunk 2→3,
 t≈34.7 s, Δlayout −0.32 in 3 frames, visible as jumping/morphing; UNVALIDATED);
@@ -166,7 +188,8 @@ aud_env still climbs (−0.078→0.682, below the 0.7 flag) but at 52-lf chunks 
 tracks the continuity context's shared noise-like envelope, not a replayed gesture —
 the hot tau_c schedule was chasing a non-gesture, and the metronome is a 16-lf-regime
 diagnosis.  **#1 audio failure at >3 chunks is now WIND, unisolated** (candidate
-carriers: S2 join re-invention — aud_refine_sim 0.58–0.64 ≈ 40% re-roll per window;
+carriers: S2 join re-invention — aud_refine_sim 0.58–0.64 ≈ 40% re-roll per window
+[eliminated by construction 2026-08-19: audio_refine removed, S2 audio is frozen];
 the spectral-pinned continuity context; S1-native half-scale audio, per-chunk std
 0.345–0.395).  The rest of the run is clean (vid_std Δ+0.000, vid_bnd 0.974–0.981,
 vid_obj 0.993–0.996, aud_rms 0.358→0.362, SLB honored 1.0, aud_hf 1.095→0.902 falling,
@@ -190,35 +213,25 @@ A `frozen_video` input that re-ran the audio against the frozen main-pass video
 was built and removed the same day: it doubles Stage-1 compute (~2× total
 pipeline), and the user rejected the cost.  The asymmetry it attacked is real —
 the video gets a dense low-σ descent in Stage 2 and the audio does not — but
-the right fix exploits the Stage-2 forward passes that ALREADY run (see
-Stage-2 audio refine below), not a second Stage-1 pass.
+the Stage-2 audio-refine lever built on exactly that idea was itself removed
+2026-08-19 (see below); the asymmetry is currently UNADDRESSED.
 
-### Stage-2 audio refine — the σ-matched low-σ descent (production)
+### Stage-2 audio refine — REMOVED 2026-08-19 ("not working")
 
-Why the audio is dull at the 4.68 shift, stated as a structural asymmetry: the VIDEO
-gets a dense low-σ descent in Stage 2 (re-noised to the manual sigmas and re-denoised)
-while the AUDIO used to pass through Stage 2 FROZEN, and Stage 1's own low-σ tail at
-4.68 is only ~2 steps (…→0.5372→0.1→0).  `audio_refine` (on `CLSSStage2`, default
-"off") turns the audio loose on the SAME Stage-2 sigmas, σ-matched at every forward —
-zero extra compute, since Stage 2 already pays for the passes and the audio is already
-in the (masked) latent.  Gate on `aud_refine_sim` (fidelity to Stage-1 audio) and
-`aud_bnd`; validate by ear.
-
-Measured escalation (why the join sigma exists): full refinement from σ0=0.909
-DESTROYED the audio (aud_refine_sim 0.07–0.16 — a melody/timbre/voice is not in the
-text prompt, so re-inventing it from 91% noise loses it; the video survives because
-its composition is prompt-specified and the detail anchor re-anchors it).  Fix:
-`audio_join_sigma` — the audio stays FROZEN (mask=0, a_timestep=0) above the join and
-joins the descent at the first step ≤ join_sigma, with an explicit noise-up to that σ
-(custom per-step-mask sampler `_make_s2_join_sampler`).  Keeps (1 − join_sigma) of the
-Stage-1 audio as starting signal: 0.725 = 27.5% kept / 2 matched steps, 0.55 = 45% / 3
-(dense sigmas), 0.422 = 58% / 1.  Live results: join 0.73 → aud_refine_sim 0.45–0.49
-and brighter (std 0.42→0.61); join 0.422 on stock 3-step sigmas → fidelity without
-brightness (rejected); dense sigmas (0.909375, 0.725, 0.55, 0.421875, 0.25, 0.0) +
-join 0.55 → the production config, wired in both canonical workflows (the 2026-08-15
-continuation run: aud_refine_sim 0.58–0.64, final audio std 0.453).  A chunk-1 onset
-limiter (smooth 3.5σ→4σ tanh) is applied to the refined audio — the S2 chunk-1 re-roll
-otherwise re-creates a violent onset transient (measured −6.08 ≈ 11σ at std 0.54).
+`audio_refine` / `audio_join_sigma` on `CLSSStage2` and the `_make_s2_join_sampler`
+custom per-step-mask sampler were deleted; Stage-2 audio is frozen passthrough
+(mask=0), bit-exact Stage-1 output.  Why it existed: the VIDEO gets a dense low-σ
+descent in Stage 2 (re-noised to the manual sigmas and re-denoised) while the audio
+passed through FROZEN, and Stage 1's own low-σ tail at the 4.68 shift is only ~2
+steps (…→0.5372→0.1→0) — the measured dull-audio asymmetry.  Why it failed: full
+refinement from σ0=0.909 DESTROYED the audio (aud_refine_sim 0.07–0.16 — a
+melody/timbre/voice is not in the text prompt, so re-inventing it from 91% noise
+loses it; the video survives because its composition is prompt-specified and the
+detail anchor re-anchors it), and the join-sigma fix (audio frozen above the join,
+explicit noise-up at it; 0.725 = 27.5% Stage-1 signal kept / 2 matched steps,
+0.55 = 45% / 3 on dense sigmas) reached aud_refine_sim 0.58–0.64 in the 2026-08-15
+run but never earned an ear win — the wind failure remained.  Do not rebuild
+without a live ear-validated win.
 
 ### Audio-continuity port audited against the reference (2026-08-13)
 
@@ -230,7 +243,8 @@ port ADDs (no reference counterpart) is a stack that structurally pins all audio
 chunk-1's statistics — it does not create the dullness (chunk-1's RAW output is
 already std ≈0.3–0.45; that is upstream, the joint-pass schedule), it locks it in:
 
-1. RMS anchor (`audio_anchor='rms_only'`, nodes.py:1938-1956) WAS a hard bidirectional
+1. RMS anchor (`audio_anchor` — since 2026-08-19 FIXED to rms_only, the knob and the
+   rms_dc arm are gone) WAS a hard bidirectional
    gain to the capped EMA target; the reference (pipeline.py:741-757) is soft,
    upward-only — it never attenuates a louder chunk.  **RELAXED 2026-08-14 to the
    reference direction: boost quiet chunks, keep louder chunks raw** (measured cuts
@@ -304,9 +318,11 @@ unlistenable noise. What the metrics missed: the extra "bandwidth" was broadband
 std is only 0.39 swamps the content with a constant spectral bed. Bandwidth and level are
 not quality. Structure lost to the RoPE wall cannot be restored downstream.
 
-The 6 nodes (`NODE_CLASS_MAPPINGS`, end of nodes.py): `CLSSConfig`, `CLSSScenePrompts`,
+The 7 nodes (`NODE_CLASS_MAPPINGS`, end of nodes.py): `CLSSConfig`, `CLSSScenePrompts`,
 `CLSSStreamingSampler`, `CLSSStage2`, `CLSSAVGuider` (split-CFG patch over an existing guider),
-`CLSSAVGuiderV2` (all-in-one Stage-1 guider).
+`CLSSAVGuiderV2` (all-in-one Stage-1 guider), `CLSSVideoDecodeSave` (streaming temporal-slice
+VAE decode → PNG frames on disk — added 2026-08-19 to kill the ~18 GB whole-video decode
+allocation; canonical workflows wire it instead of VAEDecodeTiled).
 (`CLSSDraftLength` was deleted 2026-08-16 together with the rejected soundtrack mode.)
 When the guider's positive has N scene entries, the
 sampler auto-unpacks one scene per chunk proportionally across `num_chunks`. The nodes interoperate

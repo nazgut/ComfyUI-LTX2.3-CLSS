@@ -15,9 +15,8 @@ CLSS treats the chunk hand-off as a **feedback loop** and controls it. Between c
 
 - **Calibrated context re-noising** (τc) — the overlap context is re-projected toward the data manifold instead of being accepted verbatim
 - **EMA-tracked per-channel AdaIN** — suppresses fast statistical drift while letting intentional scene evolution through
-- **Frequency-band soft shrinkage** — stops spectral energy from accumulating in the latent
 - **Dynamic anchor bank** — long-range identity tracking with scene-change-triggered commits and forced periodic insertion
-- **Two-band spatial detail anchor** — closes the progressive-softening channel the one-sided shrinkage leaves open
+- **Two-band spatial detail anchor** — counters the measured progressive high-frequency decay on long runs (symmetric per-band gains, scene-first referenced)
 - **Hot audio SLB re-noise schedule** — the audio overlap is re-noised on a 3× schedule (τc ≈ 0.15→0.28, ceiling 0.35) with envelope-flattened context; breaks the fixed-point repetition ("metronome") of chunked autoregressive audio *chunk-natively*, at any length. (A per-chunk overlap phase-jitter lever was built against the same failure and removed: it scattered the peak but fought the SLB's structural assumptions.)
 
 All of it is grounded in a **linear stability analysis** of the feedback loop in latent space (ρ_loop = 0.57), with per-chunk telemetry that localizes every drift event in wall-clock time.
@@ -67,14 +66,15 @@ See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-ch
 |---|---|
 | **CLSS Config** | CLSS hyperparameters (τc, β, overlap, …) |
 | **CLSS Scene Prompts** | Per-scene prompts encoded into flat CONDITIONING |
-| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, audio SLB + ref_audio continuity (length via `ref_audio_seconds`), per-modality audio shift (auto by default), seeded noise, full telemetry |
-| **CLSS Stage 2** | 2× refinement pass (3-step distilled LoRA, per-window detail anchor, joined audio refinement) |
+| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, audio SLB + ref_audio continuity (fixed one-overlap window), per-modality audio shift (auto by default), seeded noise, full telemetry |
+| **CLSS Stage 2** | 2× refinement pass (3-step distilled LoRA, per-window detail anchor; audio frozen passthrough) |
 | **CLSS AV Guider / V2** | Split per-modality CFG (+ modality scaling and STG in V2) |
+| **CLSS Video Decode+Save** | Streaming temporal-slice VAE decode straight to PNG frames on disk — never materializes the whole decoded video in RAM |
 
 ```
 LTXVideo Loader → CLSSScenePrompts → LTXVConditioning → CFGGuider
 EmptyLTXVLatentVideo + audio latent → LTXVConcatAVLatent
-CLSSConfig + CLSSStreamingSampler → LTXVSeparateAVLatent → VAE Decode
+CLSSConfig + CLSSStreamingSampler → LTXVSeparateAVLatent → CLSS Video Decode+Save (frames to disk)
 ```
 
 The nodes interoperate with upstream ComfyUI LTXV nodes (`comfy_extras.nodes_lt`, `nodes_custom_sampler`).

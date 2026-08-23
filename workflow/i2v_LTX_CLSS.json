@@ -177,7 +177,7 @@
   },
   "20": {
     "inputs": {
-      "sampler_name": "euler_ancestral"
+      "sampler_name": "euler"
     },
     "class_type": "KSamplerSelect",
     "_meta": {
@@ -378,11 +378,10 @@
   },
   "37": {
     "inputs": {
-      "tile_size": 512,
-      "overlap": 64,
-      "temporal_size": 4096,
-      "temporal_overlap": 8,
-      "samples": [
+      "frames_per_slice": 32,
+      "context_frames": 2,
+      "filename_prefix": "test1/frame_",
+      "latent": [
         "34",
         0
       ],
@@ -391,9 +390,9 @@
         0
       ]
     },
-    "class_type": "VAEDecodeTiled",
+    "class_type": "CLSSVideoDecodeSave",
     "_meta": {
-      "title": "VAE Decode (Tiled)"
+      "title": "CLSS Video Decode+Save (streaming)"
     }
   },
   "47": {
@@ -427,8 +426,7 @@
       "beta": 0.4,
       "overlap": 8,
       "noise_temporal_corr": 0.0,
-      "measure_g": "off",
-      "shrinkage": "on"
+      "measure_g": "off"
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -477,27 +475,10 @@
       "title": "Save Audio (Advanced)"
     }
   },
-  "96": {
-    "inputs": {
-      "filename_prefix": "test1/frame_",
-      "subfolder_name": "",
-      "compress_level": 4,
-      "images": [
-        "37",
-        0
-      ]
-    },
-    "class_type": "SaveImagesWithSubfolder",
-    "_meta": {
-      "title": "[Movie Tools] Save images"
-    }
-  },
   "97": {
     "inputs": {
       "frames_per_chunk": 0,
       "s2_overlap": 0,
-      "audio_refine": "on",
-      "audio_join_sigma": 0.55,
       "fps": [
         "12",
         0
@@ -545,9 +526,8 @@
       "tau_c": 0.05,
       "beta": 0.4,
       "overlap": 8,
-      "noise_temporal_corr": 0.3,
-      "measure_g": "off",
-      "shrinkage": "on"
+      "noise_temporal_corr": 0.0,
+      "measure_g": "off"
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -562,9 +542,6 @@
         0
       ],
       "detail_anchor": "on",
-      "audio_anchor": "rms_only",
-      "ref_audio_seconds": 8.0,
-      "audio_slb_tau_mult": 1.0,
       "audio_shift_mult": 0.0,
       "object_identity": "on",
       "guider": [
