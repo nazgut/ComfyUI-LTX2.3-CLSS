@@ -45,11 +45,6 @@ Ltx-2-CLSS/           # git submodule (github.com/nazgut/Ltx-2-CLSS) — a fork 
                       #   convert_gguf.py                                    ← GGUF→BF16 pre-conversion
 ```
 
-Note: as of this writing the working tree is mid-cleanup — the `paper/` and `simulations/`
-directories (paper LaTeX/PDF, captured run telemetry, offline math-validation scripts) and the
-old `CLAUDE.md` are deleted but not yet committed, and `README.md` still references them. Treat
-README references to `paper/` and `simulations/` as stale until the README is updated.
-
 ### `Ltx-2-CLSS/` is a git submodule with its own history
 
 Registered in `.gitmodules`, pointing at `github.com/nazgut/Ltx-2-CLSS.git` — a fork of

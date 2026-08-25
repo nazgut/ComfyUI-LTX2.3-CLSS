@@ -1,4 +1,4 @@
-# ComfyUI-LTX-CLSS
+# ComfyUI-LTX2.3-CLSS
 
 **Closed-Loop Streaming Synthesis (CLSS)** — arbitrary-length audio-video generation with LTX-2.3 22B in [ComfyUI](https://github.com/comfyanonymous/ComfyUI), on consumer **16 GB VRAM** hardware.
 
@@ -11,15 +11,28 @@
 
 Video diffusion transformers generate only a few seconds per pass. The naive remedy — chunking the timeline and conditioning each chunk on the previous one — fails within a few hundred frames: the model keeps consuming its own slightly off-distribution output, and exposure-bias drift compounds into scene collapse or grain amplification.
 
-CLSS treats the chunk hand-off as a **feedback loop** and controls it. Between chunks it applies lightweight corrections that bound the closed-loop gain below one — **without modifying any transformer weights**:
+CLSS treats the chunk hand-off as a **feedback loop** and controls it. Chunks share a streaming latent buffer (**SLB**) overlap, keeping latent memory O(overlap) instead of O(length), and between chunks CLSS applies lightweight corrections that fight drift **without modifying any transformer weights**:
 
-- **Calibrated context re-noising** (τc) — the overlap context is re-projected toward the data manifold instead of being accepted verbatim
-- **EMA-tracked per-channel AdaIN** — suppresses fast statistical drift while letting intentional scene evolution through
-- **Dynamic anchor bank** — long-range identity tracking with scene-change-triggered commits and forced periodic insertion
+- **Calibrated context re-noising** (τc) — the overlap context is re-projected toward the data manifold instead of being accepted verbatim; per-chunk schedule rises from 0.05 toward a 0.10 ceiling with a 5-chunk half-life
+- **EMA-tracked per-channel AdaIN** (β) — suppresses fast statistical drift while letting intentional scene evolution through; the EMA reference **resets at every scene change**, so the first chunk of a new scene re-anchors it instead of being dragged toward the previous scene's statistics
+- **Dynamic anchor bank** — long-range identity tracking with scene-change-triggered commits
 - **Two-band spatial detail anchor** — counters the measured progressive high-frequency decay on long runs (symmetric per-band gains, scene-first referenced)
-- **Hot audio SLB re-noise schedule** — the audio overlap is re-noised on a 3× schedule (τc ≈ 0.15→0.28, ceiling 0.35) with envelope-flattened context; breaks the fixed-point repetition ("metronome") of chunked autoregressive audio *chunk-natively*, at any length. (A per-chunk overlap phase-jitter lever was built against the same failure and removed: it scattered the peak but fought the SLB's structural assumptions.)
+- **Audio seam control** — the audio SLB can be placed frozen, re-noised (up to 3× τc, ceiling 0.35, against the chunked-audio "metronome" fixed-point repetition), or regenerated freely with the last N seconds of the previous tail pinned frozen at the seam so vocal phrases aren't cut mid-phoneme
+- **Optional temporally-correlated noise** — a run-constant shared frame mixed into every video noise frame (FreeNoise/PYoCo family), keeping each frame's marginal exactly N(0,1)
 
-All of it is grounded in a **linear stability analysis** of the feedback loop in latent space (ρ_loop = 0.57), with per-chunk telemetry that localizes every drift event in wall-clock time.
+Audio and video are jointly modelled; audio wants higher CFG (~7) than video (~4), and the guider splits them.
+
+## Multi-scene prompts
+
+`CLSS Scene Prompts` takes one prompt per scene, separated by a line containing only `---`, and emits one CONDITIONING entry per scene. The sampler unpacks scenes proportionally across `num_chunks` and hands off at block boundaries with a **two-step crossfade** (`scene_handoff="transition_chunk"`, default): the outgoing scene's last chunk is guided by a 25%-incoming embedding blend, the incoming scene's first chunk by 75%-incoming. A single 50/50 transition chunk measured off-manifold for far-apart scenes and poisoned the next scene's SLB — the two-step version holds boundary similarity at 0.82–0.96 in the same scenario.
+
+Rule of thumb: every scene block needs ≥ 2 chunks, i.e. `num_chunks ≥ 2 × scenes`. `blend` (single 50/50 chunk) and `hard` (plain text swap) remain available for comparison.
+
+## Measured constraints that shape the defaults
+
+- **The 20 s native-window wall.** AV RoPE positions are in seconds with `max_pos=20` for both modalities; any single window longer than ~20 s runs off the positional grid (audio glitches, video goes near-static). The sampler enforces this automatically: the overlap is clamped so overlap+new ≤ 19.5 s, and an over-long chunk is auto-split into uniform sub-chunks. Note the wall's *edge* is already degraded — the validated config uses ~13 s windows so the tail that becomes the next chunk's SLB is healthy; 19.3 s windows produced progressive detail fade over a run.
+- **The scheduler's shift scales with the connected latent's token count.** At long chunks the video wants a high shift and the audio wants 1.844 — no shared schedule serves both, which is what `audio_shift_mult` (0 = AUTO: min(video shift, 1.844)) exists for.
+- **Audio latent scale.** The audio VAE normalizer is calibrated so real audio sits at unit variance; generated audio falls short (lower std, less treble, stereo collapse at long windows) and the shortfall predicts how bad it sounds. A post-hoc per-(channel,bin) latent statistics repair was tried and **rejected** — it produced a broadband noise bed and collapsed dynamics. There is no post-hoc fix for a draft generated past the wall; generate inside it.
 
 ## Results
 
@@ -32,10 +45,8 @@ Matched T2V and I2V runs (identical seed and guidance stack, 10 chunks each, ~53
 | Audio loudness | held to chunk-1 reference (±5 %) against raw drifts up to +72 % |
 | Audio envelope repetition (metronome) | env_corr 0.76–0.96 → **≤ 0.19** (eliminated) |
 | Audio boundary similarity | 0.07–0.53 → **0.85–0.92** |
+| Scene-boundary continuity (two-step crossfade) | **0.82–0.96** (vs 0.24 for a single 50/50 transition chunk) |
 | Hardware | single 16 GB GPU (GGUF Q4_K_S + CPU block-streaming) |
-| Time | ≈ 96–97 min per ~53 s clip (Stage 1 + Stage 2) |
-
-See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-chunk metrics, and the failure-mode history.
 
 ## Installation
 
@@ -44,7 +55,7 @@ See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-ch
 
    ```bash
    cd ComfyUI/custom_nodes
-   git clone --recurse-submodules https://github.com/nazgut/ComfyUI-LTX-CLSS.git
+   git clone --recurse-submodules https://github.com/nazgut/ComfyUI-LTX2.3-CLSS.git
    ```
 
    Already cloned without `--recurse-submodules`? Run
@@ -56,63 +67,38 @@ See [`paper/clss_paper.pdf`](paper/clss_paper.pdf) for the full analysis, per-ch
    - `Lightricks/LTX-2.3` — 22B checkpoint (GGUF Q4_K_S recommended for 16 GB VRAM), video/audio VAEs, spatial upscaler, distilled LoRA
    - `google/gemma-3-12b-it` — text encoder (GGUF + tokenizer directory)
 
-4. Load the example workflow: [`workflow/i2v_LTX_CLSS.json`](workflow/i2v_LTX_CLSS.json)
+4. Load a canonical workflow: [`workflow/t2v_LTX_CLSS.json`](workflow/t2v_LTX_CLSS.json) (text-only) or [`workflow/i2v_LTX_CLSS.json`](workflow/i2v_LTX_CLSS.json) (with guide image). Both carry the validated production config — copy them for your own experiments rather than editing in place.
 
 **Hardware requirements:** ~16 GB VRAM, ~48 GB system RAM (the 22B checkpoint is dequantized to BF16 in pinned CPU RAM; transformer blocks are streamed to GPU).
 
 ## Nodes
 
+Every input on every node carries an in-UI tooltip explaining what it does, its default, and the measured evidence behind it.
+
 | Node | Purpose |
 |---|---|
-| **CLSS Config** | CLSS hyperparameters (τc, β, overlap, …) |
-| **CLSS Scene Prompts** | Per-scene prompts encoded into flat CONDITIONING |
-| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, audio SLB + ref_audio continuity (fixed one-overlap window), per-modality audio shift (auto by default), seeded noise, full telemetry |
-| **CLSS Stage 2** | 2× refinement pass (3-step distilled LoRA, per-window detail anchor; audio frozen passthrough) |
-| **CLSS AV Guider / V2** | Split per-modality CFG (+ modality scaling and STG in V2) |
+| **CLSS Config** | CLSS hyperparameters (τc, β, overlap, noise temporal correlation) |
+| **CLSS Scene Prompts** | Per-scene prompts (split on `---`) encoded into multi-entry CONDITIONING |
+| **CLSS Streaming Sampler** | The main chunked Stage-1 sampler — CLSS corrections, scene crossfade, audio SLB seam modes, per-modality audio shift (auto by default), RoPE-wall enforcement, seeded noise, per-chunk telemetry + end-of-run trend summary |
+| **CLSS Stage 2** | 2× refinement pass (distilled LoRA, same SLB continuity; audio frozen passthrough) |
+| **CLSS AV Guider** | Split per-modality CFG patch over an existing guider |
+| **CLSS AV Guider V2** | All-in-one Stage-1 guider: split CFG + modality scale + STG (video_cfg 4.0 / audio_cfg 7.0, stg_block 28 validated for LTX-2.3) |
 | **CLSS Video Decode+Save** | Streaming temporal-slice VAE decode straight to PNG frames on disk — never materializes the whole decoded video in RAM |
 
 ```
-LTXVideo Loader → CLSSScenePrompts → LTXVConditioning → CFGGuider
+LTXVideo Loader → CLSSScenePrompts → LTXVConditioning → CLSSAVGuiderV2
 EmptyLTXVLatentVideo + audio latent → LTXVConcatAVLatent
-CLSSConfig + CLSSStreamingSampler → LTXVSeparateAVLatent → CLSS Video Decode+Save (frames to disk)
+CLSSConfig + CLSSStreamingSampler → LTXVLatentUpsampler → CLSSStage2 → CLSS Video Decode+Save
 ```
 
 The nodes interoperate with upstream ComfyUI LTXV nodes (`comfy_extras.nodes_lt`, `nodes_custom_sampler`).
-
-### Audio latent scale
-
-The LTX-2 audio VAE's normalizer is calibrated so **real audio sits at unit variance**
-(measured over four real tracks: overall latent std 0.98–1.26, per-frequency-bin std flat
-at 1.00). Generated audio falls short of that, and how far short predicts how bad it
-sounds — a 104 s single-window soundtrack draft measured std 0.48, bandwidth 3.1 kHz and
-L/R correlation 1.00000 (literally mono), while the strongest per-chunk run on these
-measures reached std 0.84,
-6.1 kHz and real stereo. Half scale in a log-mel space means quiet (−31.6 dBFS against
-−21…−16 for the reference tracks) and low-passed far below the 8 kHz mel ceiling. The VAE
-is not at fault: real music round-trips through it with bandwidth and stereo intact.
-
-Note what is *not* wrong: the draft's dynamic range (8.1 dB) already exceeds real music's
-(4.3–6.3 dB), and its log-mel contrast (1.35) exceeds real music's (1.00). The deficit is
-level and treble, not contrast — so scaling the latent's variance up is the wrong lever
-and is deliberately not offered.
-
-Measure any take with `python simulations/audio_latent_probe.py FILE --reference` — audio
-VAE only, CPU, no transformer, so it runs while ComfyUI holds the GPU.
-
-A latent-statistics repair was tried and **rejected** (2026-08-10). Shifting the audio
-latent's per-(channel, bin) mean toward a real-music profile raised every metric I was
-watching — bandwidth ro99 3141 → 4477 Hz, level +4 dB — and sounded like noise on a live
-run. The added "bandwidth" was a broadband noise bed (energy above 4 kHz went 0.22% →
-1.31%) while the loudness envelope collapsed to 2.4 dB. There is no post-hoc fix for a
-draft generated past the wall; generate inside it.
 
 ## Repository layout
 
 ```
 nodes.py              # all ComfyUI node implementations
-workflow/             # example ComfyUI workflow (i2v)
-paper/                # CLSS paper (LaTeX + PDF) and experiment logs
-simulations/          # standalone pure-math diagnostic scripts (no GPU needed)
+__init__.py           # sys.path injection + node-mapping exports
+workflow/             # the two canonical workflows (t2v, i2v)
 Ltx-2-CLSS/           # git submodule (github.com/nazgut/Ltx-2-CLSS) — a fork of
                       # Lightricks' LTX-2 monorepo with the CLSS additions:
                       #   packages/ltx-pipelines/.../streaming/  ← the CLSS algorithm
