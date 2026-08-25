@@ -71,7 +71,7 @@
   },
   "10": {
     "inputs": {
-      "value": 409
+      "value": 241
     },
     "class_type": "PrimitiveInt",
     "_meta": {
@@ -206,7 +206,7 @@
   },
   "22": {
     "inputs": {
-      "steps": 20,
+      "steps": 30,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
@@ -425,8 +425,7 @@
       "tau_c": 0.05,
       "beta": 0.4,
       "overlap": 8,
-      "noise_temporal_corr": 0.0,
-      "measure_g": "off"
+      "noise_temporal_corr": 0.0
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -440,7 +439,7 @@
       "modality_scale": 1,
       "rescale": 0.7,
       "video_stg": 1,
-      "audio_stg": 0,
+      "audio_stg": 1,
       "stg_block": 28,
       "model": [
         "3",
@@ -526,8 +525,7 @@
       "tau_c": 0.05,
       "beta": 0.4,
       "overlap": 8,
-      "noise_temporal_corr": 0.0,
-      "measure_g": "off"
+      "noise_temporal_corr": 0.0
     },
     "class_type": "CLSSConfig",
     "_meta": {
@@ -536,14 +534,13 @@
   },
   "100": {
     "inputs": {
-      "num_chunks": 4,
+      "num_chunks": 6,
       "fps": [
         "12",
         0
       ],
       "detail_anchor": "on",
       "audio_shift_mult": 0.0,
-      "object_identity": "on",
       "guider": [
         "94",
         0
@@ -576,9 +573,10 @@
         "2",
         0
       ],
-      "video_slb_tau_mult": 1.0,
-      "open_loop": "off",
-      "auto_seam_pin": "off"
+      "video_slb_tau_mult": 0.5,
+      "auto_seam_pin": "on",
+      "audio_slb_tau_mult": -0.5,
+      "scene_handoff": "transition_chunk"
     },
     "class_type": "CLSSStreamingSampler",
     "_meta": {
