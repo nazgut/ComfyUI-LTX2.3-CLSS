@@ -1,2180 +1,585 @@
 {
-  "id": "00000000-0000-0000-0000-000000000000",
-  "revision": 0,
-  "last_node_id": 100,
-  "last_link_id": 106,
-  "nodes": [
-    {
-      "id": 1,
-      "type": "VAELoaderKJ",
-      "pos": [
-        100,
-        130
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            59,
-            84
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "VAELoaderKJ"
-      },
-      "widgets_values": [
-        "ltx-2.3-22b-dev_audio_vae.safetensors",
-        "main_device",
-        "bf16"
-      ],
-      "widgets_values_named": {
-        "vae_name": "ltx-2.3-22b-dev_audio_vae.safetensors",
-        "device": "main_device",
-        "weight_dtype": "bf16"
-      }
+  "1": {
+    "inputs": {
+      "vae_name": "ltx-2.3-22b-dev_audio_vae.safetensors",
+      "device": "main_device",
+      "weight_dtype": "bf16"
     },
-    {
-      "id": 2,
-      "type": "VAELoaderKJ",
-      "pos": [
-        100,
-        366
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            75,
-            86,
-            106
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "VAELoaderKJ"
-      },
-      "widgets_values": [
-        "ltx-2.3-22b-dev_video_vae.safetensors",
-        "main_device",
-        "bf16"
-      ],
-      "widgets_values_named": {
-        "vae_name": "ltx-2.3-22b-dev_video_vae.safetensors",
-        "device": "main_device",
-        "weight_dtype": "bf16"
-      }
-    },
-    {
-      "id": 3,
-      "type": "UnetLoaderGGUF",
-      "pos": [
-        100,
-        602
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            76,
-            88
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "UnetLoaderGGUF"
-      },
-      "widgets_values": [
-        "ltx-2.3-22b-dev-UD-Q4_K_S.gguf"
-      ],
-      "widgets_values_named": {
-        "unet_name": "ltx-2.3-22b-dev-UD-Q4_K_S.gguf"
-      }
-    },
-    {
-      "id": 6,
-      "type": "CLIPTextEncode",
-      "pos": [
-        480.9224609375,
-        790
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 19,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 54
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            72
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLIPTextEncode"
-      },
-      "widgets_values": [
-        "blurry, low quality, still frame, frames, watermark, overlay, titles, has blurbox, has subtitles, no harsh electronic hiss, no heavy SFX"
-      ],
-      "widgets_values_named": {
-        "text": "blurry, low quality, still frame, frames, watermark, overlay, titles, has blurbox, has subtitles, no harsh electronic hiss, no heavy SFX"
-      }
-    },
-    {
-      "id": 7,
-      "type": "EmptyImage",
-      "pos": [
-        100,
-        790
-      ],
-      "size": [
-        270,
-        130
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            55
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "EmptyImage"
-      },
-      "widgets_values": [
-        1280,
-        720,
-        1,
-        0
-      ],
-      "widgets_values_named": {
-        "width": 1280,
-        "height": 720,
-        "batch_size": 1,
-        "color": 0
-      }
-    },
-    {
-      "id": 8,
-      "type": "ImageScaleBy",
-      "pos": [
-        480.9224609375,
-        342
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 17,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 55
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            56
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ImageScaleBy"
-      },
-      "widgets_values": [
-        "lanczos",
-        0.5
-      ],
-      "widgets_values_named": {
-        "upscale_method": "lanczos",
-        "scale_by": 0.5
-      }
-    },
-    {
-      "id": 9,
-      "type": "GetImageSize",
-      "pos": [
-        980.9224609375,
-        130
-      ],
-      "size": [
-        140,
-        124
-      ],
-      "flags": {},
-      "order": 21,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 56
-        }
-      ],
-      "outputs": [
-        {
-          "name": "width",
-          "type": "INT",
-          "links": [
-            60
-          ]
-        },
-        {
-          "name": "height",
-          "type": "INT",
-          "links": [
-            61
-          ]
-        },
-        {
-          "name": "batch_size",
-          "type": "INT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "GetImageSize"
-      },
-      "widgets_values": [],
-      "widgets_values_named": {}
-    },
-    {
-      "id": 10,
-      "type": "PrimitiveInt",
-      "pos": [
-        100,
-        1050
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            57,
-            62
-          ]
-        }
-      ],
-      "title": "Length",
-      "properties": {
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        241,
-        "fixed"
-      ],
-      "widgets_values_named": {
-        "value": 241,
-        "fixed": "fixed"
-      }
-    },
-    {
-      "id": 11,
-      "type": "PrimitiveInt",
-      "pos": [
-        100,
-        1262
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            58
-          ]
-        }
-      ],
-      "title": "Frame Rate(int)",
-      "properties": {
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        24,
-        "fixed"
-      ],
-      "widgets_values_named": {
-        "value": 24,
-        "fixed": "fixed"
-      }
-    },
-    {
-      "id": 12,
-      "type": "PrimitiveFloat",
-      "pos": [
-        100,
-        1474
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "FLOAT",
-          "type": "FLOAT",
-          "links": [
-            70,
-            92,
-            99
-          ]
-        }
-      ],
-      "title": "Frame Rate(float)",
-      "properties": {
-        "Node name for S&R": "PrimitiveFloat"
-      },
-      "widgets_values": [
-        24
-      ],
-      "widgets_values_named": {
-        "value": 24
-      }
-    },
-    {
-      "id": 13,
-      "type": "LTXVEmptyLatentAudio",
-      "pos": [
-        480.9224609375,
-        554
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 18,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "Audio VAE",
-          "name": "audio_vae",
-          "type": "VAE",
-          "link": 59
-        },
-        {
-          "name": "frames_number",
-          "type": "INT",
-          "widget": {
-            "name": "frames_number"
-          },
-          "link": 57
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT,INT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 58
-        }
-      ],
-      "outputs": [
-        {
-          "name": "Latent",
-          "type": "LATENT",
-          "links": [
-            64
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVEmptyLatentAudio"
-      },
-      "widgets_values": [
-        97,
-        25,
-        1
-      ],
-      "widgets_values_named": {
-        "frames_number": 97,
-        "frame_rate": 25,
-        "batch_size": 1
-      }
-    },
-    {
-      "id": 14,
-      "type": "EmptyLTXVLatentVideo",
-      "pos": [
-        1350.9224609375,
-        130
-      ],
-      "size": [
-        270,
-        130
-      ],
-      "flags": {},
-      "order": 23,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "width",
-          "type": "INT",
-          "widget": {
-            "name": "width"
-          },
-          "link": 60
-        },
-        {
-          "name": "height",
-          "type": "INT",
-          "widget": {
-            "name": "height"
-          },
-          "link": 61
-        },
-        {
-          "name": "length",
-          "type": "INT",
-          "widget": {
-            "name": "length"
-          },
-          "link": 62
-        }
-      ],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            63
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "EmptyLTXVLatentVideo"
-      },
-      "widgets_values": [
-        768,
-        512,
-        97,
-        1
-      ],
-      "widgets_values_named": {
-        "width": 768,
-        "height": 512,
-        "length": 97,
-        "batch_size": 1
-      }
-    },
-    {
-      "id": 15,
-      "type": "LTXVConcatAVLatent",
-      "pos": [
-        1829.4757812500002,
-        130
-      ],
-      "size": [
-        181.308203125,
-        46
-      ],
-      "flags": {},
-      "order": 25,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "video_latent",
-          "type": "LATENT",
-          "link": 63
-        },
-        {
-          "name": "audio_latent",
-          "type": "LATENT",
-          "link": 64
-        }
-      ],
-      "outputs": [
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "links": [
-            69,
-            104
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVConcatAVLatent"
-      }
-    },
-    {
-      "id": 16,
-      "type": "RandomNoise",
-      "pos": [
-        100,
-        1662
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "NOISE",
-          "type": "NOISE",
-          "links": [
-            103
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "RandomNoise"
-      },
-      "widgets_values": [
-        595496602479605,
-        "randomize"
-      ],
-      "widgets_values_named": {
-        "noise_seed": 595496602479605,
-        "control_after_generate": "randomize"
-      }
-    },
-    {
-      "id": 19,
-      "type": "LTXVSeparateAVLatent",
-      "pos": [
-        2851.5066406250003,
-        130
-      ],
-      "size": [
-        193.2916015625,
-        46
-      ],
-      "flags": {},
-      "order": 28,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "av_latent",
-          "type": "LATENT",
-          "link": 65
-        }
-      ],
-      "outputs": [
-        {
-          "name": "video_latent",
-          "type": "LATENT",
-          "links": [
-            68
-          ]
-        },
-        {
-          "name": "audio_latent",
-          "type": "LATENT",
-          "links": [
-            78
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVSeparateAVLatent"
-      }
-    },
-    {
-      "id": 20,
-      "type": "KSamplerSelect",
-      "pos": [
-        100,
-        1874
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SAMPLER",
-          "type": "SAMPLER",
-          "links": [
-            101
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "KSamplerSelect"
-      },
-      "widgets_values": [
-        "euler"
-      ],
-      "widgets_values_named": {
-        "sampler_name": "euler"
-      }
-    },
-    {
-      "id": 21,
-      "type": "LTXVCropGuides",
-      "pos": [
-        3144.7982421875004,
-        130
-      ],
-      "size": [
-        152.7134765625,
-        66
-      ],
-      "flags": {},
-      "order": 29,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 66
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 67
-        },
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "link": 68
-        }
-      ],
-      "outputs": [
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "links": [
-            80
-          ]
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "links": [
-            81
-          ]
-        },
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "links": [
-            73
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVCropGuides"
-      }
-    },
-    {
-      "id": 23,
-      "type": "LTXVConditioning",
-      "pos": [
-        980.9224609375,
-        326
-      ],
-      "size": [
-        270,
-        78
-      ],
-      "flags": {},
-      "order": 22,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 71
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 72
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 70
-        }
-      ],
-      "outputs": [
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "links": [
-            66,
-            89
-          ]
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "links": [
-            67,
-            90
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVConditioning"
-      },
-      "widgets_values": [
-        25
-      ],
-      "widgets_values_named": {
-        "frame_rate": 25
-      }
-    },
-    {
-      "id": 25,
-      "type": "LTXVLatentUpsampler",
-      "pos": [
-        3397.5117187500005,
-        358
-      ],
-      "size": [
-        187.8501953125,
-        66
-      ],
-      "flags": {},
-      "order": 31,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 73
-        },
-        {
-          "name": "upscale_model",
-          "type": "LATENT_UPSCALE_MODEL",
-          "link": 74
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 75
-        }
-      ],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            77
-          ]
-        }
-      ],
-      "title": "spatial",
-      "properties": {
-        "Node name for S&R": "LTXVLatentUpsampler"
-      }
-    },
-    {
-      "id": 26,
-      "type": "LatentUpscaleModelLoader",
-      "pos": [
-        100,
-        2062
-      ],
-      "size": [
-        280.9224609375,
-        58
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "LATENT_UPSCALE_MODEL",
-          "type": "LATENT_UPSCALE_MODEL",
-          "links": [
-            74
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LatentUpscaleModelLoader"
-      },
-      "widgets_values": [
-        "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
-      ],
-      "widgets_values_named": {
-        "model_name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
-      }
-    },
-    {
-      "id": 27,
-      "type": "LoraLoaderModelOnly",
-      "pos": [
-        480.9224609375,
-        130
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 16,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 76
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            79
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LoraLoaderModelOnly"
-      },
-      "widgets_values": [
-        "ltx-2.3-22b-distilled-lora-384.safetensors",
-        1
-      ],
-      "widgets_values_named": {
-        "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors",
-        "strength_model": 1
-      }
-    },
-    {
-      "id": 28,
-      "type": "LTXVConcatAVLatent",
-      "pos": [
-        3767.5117187500005,
-        130
-      ],
-      "size": [
-        181.308203125,
-        46
-      ],
-      "flags": {},
-      "order": 32,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "video_latent",
-          "type": "LATENT",
-          "link": 77
-        },
-        {
-          "name": "audio_latent",
-          "type": "LATENT",
-          "link": 78
-        }
-      ],
-      "outputs": [
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "links": [
-            97
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVConcatAVLatent"
-      }
-    },
-    {
-      "id": 29,
-      "type": "KSamplerSelect",
-      "pos": [
-        100,
-        2250
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SAMPLER",
-          "type": "SAMPLER",
-          "links": [
-            94
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "KSamplerSelect"
-      },
-      "widgets_values": [
-        "euler_ancestral"
-      ],
-      "widgets_values_named": {
-        "sampler_name": "euler_ancestral"
-      }
-    },
-    {
-      "id": 30,
-      "type": "ManualSigmas",
-      "pos": [
-        100,
-        2438
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "SIGMAS",
-          "type": "SIGMAS",
-          "links": [
-            95
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ManualSigmas"
-      },
-      "widgets_values": [
-        "0.909375, 0.725, 0.55, 0.421875, 0.25, 0.0"
-      ],
-      "widgets_values_named": {
-        "sigmas": "0.909375, 0.725, 0.55, 0.421875, 0.25, 0.0"
-      }
-    },
-    {
-      "id": 31,
-      "type": "CFGGuider",
-      "pos": [
-        3397.5117187500005,
-        130
-      ],
-      "size": [
-        270,
-        98
-      ],
-      "flags": {},
-      "order": 30,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 79
-        },
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 80
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 81
-        }
-      ],
-      "outputs": [
-        {
-          "name": "GUIDER",
-          "type": "GUIDER",
-          "links": [
-            93
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CFGGuider"
-      },
-      "widgets_values": [
-        1
-      ],
-      "widgets_values_named": {
-        "cfg": 1
-      }
-    },
-    {
-      "id": 32,
-      "type": "RandomNoise",
-      "pos": [
-        100,
-        2626
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "NOISE",
-          "type": "NOISE",
-          "links": [
-            96
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "RandomNoise"
-      },
-      "widgets_values": [
-        1037028275052957,
-        "randomize"
-      ],
-      "widgets_values_named": {
-        "noise_seed": 1037028275052957,
-        "control_after_generate": "randomize"
-      }
-    },
-    {
-      "id": 34,
-      "type": "LTXVSeparateAVLatent",
-      "pos": [
-        4418.819921875001,
-        130
-      ],
-      "size": [
-        193.2916015625,
-        46
-      ],
-      "flags": {},
-      "order": 34,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "av_latent",
-          "type": "LATENT",
-          "link": 82
-        }
-      ],
-      "outputs": [
-        {
-          "name": "video_latent",
-          "type": "LATENT",
-          "links": [
-            85
-          ]
-        },
-        {
-          "name": "audio_latent",
-          "type": "LATENT",
-          "links": [
-            83
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVSeparateAVLatent"
-      }
-    },
-    {
-      "id": 35,
-      "type": "LTXVAudioVAEDecode",
-      "pos": [
-        4712.1115234375,
-        386
-      ],
-      "size": [
-        202.991796875,
-        46
-      ],
-      "flags": {},
-      "order": 36,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 83
-        },
-        {
-          "label": "Audio VAE",
-          "name": "audio_vae",
-          "type": "VAE",
-          "link": 84
-        }
-      ],
-      "outputs": [
-        {
-          "name": "Audio",
-          "type": "AUDIO",
-          "links": [
-            91
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVAudioVAEDecode"
-      }
-    },
-    {
-      "id": 37,
-      "type": "CLSSVideoDecodeSave",
-      "pos": [
-        4712.1115234375,
-        130
-      ],
-      "size": [
-        354.9419921875,
-        126
-      ],
-      "flags": {},
-      "order": 35,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 86
-        },
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "link": 85
-        }
-      ],
-      "outputs": [],
-      "properties": {
-        "Node name for S&R": "CLSSVideoDecodeSave"
-      },
-      "widgets_values": [
-        "test1/frame_",
-        32,
-        2
-      ],
-      "widgets_values_named": {
-        "filename_prefix": "test1/frame_",
-        "frames_per_slice": 32,
-        "context_frames": 2
-      }
-    },
-    {
-      "id": 47,
-      "type": "DualCLIPLoaderGGUF",
-      "pos": [
-        100,
-        2838
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "CLIP",
-          "type": "CLIP",
-          "links": [
-            54,
-            87
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "DualCLIPLoaderGGUF"
-      },
-      "widgets_values": [
-        "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
-        "ltx-2.3-22b-dev_embeddings_connectors.safetensors",
-        "ltxv"
-      ],
-      "widgets_values_named": {
-        "clip_name1": "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
-        "clip_name2": "ltx-2.3-22b-dev_embeddings_connectors.safetensors",
-        "type": "ltxv"
-      }
-    },
-    {
-      "id": 58,
-      "type": "CLSSScenePrompts",
-      "pos": [
-        480.9224609375,
-        1120
-      ],
-      "size": [
-        400,
-        200
-      ],
-      "flags": {},
-      "order": 20,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 87
-        }
-      ],
-      "outputs": [
-        {
-          "name": "conditioning",
-          "type": "CONDITIONING",
-          "links": [
-            71
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSScenePrompts"
-      },
-      "widgets_values": [
-        "From the driver's first-person perspective, a classic red vintage Ferrari convertible hugs the winding Pacific Coast Highway, its glossy hood and chrome grille leading the view as the car glides through a gentle right-hand curve. The driver's tanned hands grip the black leather steering wheel at ten and two, fingers tapping rhythmically as the asphalt rushes beneath the open hood. The bright white dashboard gauges and the wind buffeting the windshield frame fill the immediate foreground, while the steering wheel slightly rotates with each turn. Through the curved glass, the deep blue Pacific Ocean sparkles intensely to the right, with whitecaps breaking against scattered rocks just offshore, while dry golden-brown hills rise steeply on the left, dotted with green coastal scrub. A fixed, eye-level POV camera is mounted just behind the steering wheel, looking straight ahead over the hood, perfectly framing the road's center line as it unfurls toward the horizon. Late afternoon golden hour light pours through the windshield, casting warm orange and yellow glare across the polished chrome and leather, with long shadows stretching from the front wheels. Audio is radio song playing classic 90' song in high quality with no artifacts and no noise. The steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead.\n---\nThe steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead. The driver's right hand lifts briefly from the wheel to adjust the rearview mirror, momentarily obscuring the left side of the frame with a black leather glove, before returning firmly to the ten-and-two position. The car accelerates smoothly, the tachometer needle on the white dashboard swinging upward as the engine's deep roar intensifies. Through the windshield, the ocean view gradually shrinks to the right as the highway curves slightly inland, replacing the crashing waves with the first scattered clusters of whitewashed buildings and telephone poles lining the roadside. The dry golden hills on the left now show the distinct grid patterns of suburban development creeping up their lower slopes. The golden hour light grows warmer, deepening to a rich amber that bounces off the windshield, creating a strong lens flare that partially obscures the far-left lane. Audio remains the crisp 90's rock track from the radio, now layered with the rising pitch of the Ferrari's V12 engine and the increased whoosh of wind turbulence around the windshield frame. A large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood.\n---\nA large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood. The driver's left hand firmly turns the steering wheel to the right, the leather-wrapped rim sliding through the gloved fingers as the Ferrari smoothly veers onto the off-ramp. The camera tilts slightly with the lateral G-force, now showing the concrete barriers and merging lanes of the city approach in the foreground. The ocean vanishes entirely, replaced by a dense skyline of glass-and-steel high-rises that catch the last rays of the setting sun, creating a blinding mosaic of orange and pink reflections across every window. The car decelerates, the driver's right foot easing off the gas as the tachometer drops, and the first city traffic light appears ahead, its red glow vivid against the dusky blue sky. The immediate foreground is now filled with the Ferrari's glossy hood reflecting the city's grid of streetlights, with the driver's hands steadying the wheel as the road narrows into a multi-lane urban boulevard. Audio transforms from wind noise to the muffled, echoing roar of the V12 bouncing off nearby concrete walls and storefronts, with the radio song fading slightly beneath the urban reverberation. The Ferrari rolls to a complete, purring stop at the first city intersection, the view now perfectly framed by towering glass facades on both sides, the red traffic light dangling overhead, while the driver's gloved thumb taps impatiently against the leather wheel as a crosswalk signal ticks down its glowing white numbers directly ahead.",
-        512
-      ],
-      "widgets_values_named": {
-        "prompts": "From the driver's first-person perspective, a classic red vintage Ferrari convertible hugs the winding Pacific Coast Highway, its glossy hood and chrome grille leading the view as the car glides through a gentle right-hand curve. The driver's tanned hands grip the black leather steering wheel at ten and two, fingers tapping rhythmically as the asphalt rushes beneath the open hood. The bright white dashboard gauges and the wind buffeting the windshield frame fill the immediate foreground, while the steering wheel slightly rotates with each turn. Through the curved glass, the deep blue Pacific Ocean sparkles intensely to the right, with whitecaps breaking against scattered rocks just offshore, while dry golden-brown hills rise steeply on the left, dotted with green coastal scrub. A fixed, eye-level POV camera is mounted just behind the steering wheel, looking straight ahead over the hood, perfectly framing the road's center line as it unfurls toward the horizon. Late afternoon golden hour light pours through the windshield, casting warm orange and yellow glare across the polished chrome and leather, with long shadows stretching from the front wheels. Audio is radio song playing classic 90' song in high quality with no artifacts and no noise. The steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead.\n---\nThe steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead. The driver's right hand lifts briefly from the wheel to adjust the rearview mirror, momentarily obscuring the left side of the frame with a black leather glove, before returning firmly to the ten-and-two position. The car accelerates smoothly, the tachometer needle on the white dashboard swinging upward as the engine's deep roar intensifies. Through the windshield, the ocean view gradually shrinks to the right as the highway curves slightly inland, replacing the crashing waves with the first scattered clusters of whitewashed buildings and telephone poles lining the roadside. The dry golden hills on the left now show the distinct grid patterns of suburban development creeping up their lower slopes. The golden hour light grows warmer, deepening to a rich amber that bounces off the windshield, creating a strong lens flare that partially obscures the far-left lane. Audio remains the crisp 90's rock track from the radio, now layered with the rising pitch of the Ferrari's V12 engine and the increased whoosh of wind turbulence around the windshield frame. A large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood.\n---\nA large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood. The driver's left hand firmly turns the steering wheel to the right, the leather-wrapped rim sliding through the gloved fingers as the Ferrari smoothly veers onto the off-ramp. The camera tilts slightly with the lateral G-force, now showing the concrete barriers and merging lanes of the city approach in the foreground. The ocean vanishes entirely, replaced by a dense skyline of glass-and-steel high-rises that catch the last rays of the setting sun, creating a blinding mosaic of orange and pink reflections across every window. The car decelerates, the driver's right foot easing off the gas as the tachometer drops, and the first city traffic light appears ahead, its red glow vivid against the dusky blue sky. The immediate foreground is now filled with the Ferrari's glossy hood reflecting the city's grid of streetlights, with the driver's hands steadying the wheel as the road narrows into a multi-lane urban boulevard. Audio transforms from wind noise to the muffled, echoing roar of the V12 bouncing off nearby concrete walls and storefronts, with the radio song fading slightly beneath the urban reverberation. The Ferrari rolls to a complete, purring stop at the first city intersection, the view now perfectly framed by towering glass facades on both sides, the red traffic light dangling overhead, while the driver's gloved thumb taps impatiently against the leather wheel as a crosswalk signal ticks down its glowing white numbers directly ahead.",
-        "max_length": 512
-      }
-    },
-    {
-      "id": 82,
-      "type": "CLSSConfig",
-      "pos": [
-        100,
-        3074
-      ],
-      "size": [
-        278.76171875,
-        130
-      ],
-      "flags": {},
-      "order": 14,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "clss_config",
-          "type": "CLSS_CONFIG",
-          "links": [
-            98
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSConfig"
-      },
-      "widgets_values": [
-        0.05,
-        0.4,
-        8,
-        0
-      ],
-      "widgets_values_named": {
-        "tau_c": 0.05,
-        "beta": 0.4,
-        "overlap": 8,
-        "noise_temporal_corr": 0
-      }
-    },
-    {
-      "id": 95,
-      "type": "SaveAudioAdvanced",
-      "pos": [
-        5167.053515625,
-        130
-      ],
-      "size": [
-        270,
-        136
-      ],
-      "flags": {},
-      "order": 37,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "link": 91
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": null
-        }
-      ],
-      "properties": {},
-      "widgets_values": [
-        "audio/ComfyUI",
-        "flac"
-      ],
-      "widgets_values_named": {
-        "filename_prefix": "audio/ComfyUI",
-        "format": "flac"
-      }
-    },
-    {
-      "id": 97,
-      "type": "CLSSStage2",
-      "pos": [
-        4048.8199218750005,
-        130
-      ],
-      "size": [
-        270,
-        246
-      ],
-      "flags": {},
-      "order": 33,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "guider",
-          "type": "GUIDER",
-          "link": 93
-        },
-        {
-          "name": "sampler",
-          "type": "SAMPLER",
-          "link": 94
-        },
-        {
-          "name": "sigmas",
-          "type": "SIGMAS",
-          "link": 95
-        },
-        {
-          "name": "noise",
-          "type": "NOISE",
-          "link": 96
-        },
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "link": 97
-        },
-        {
-          "name": "clss_config",
-          "type": "CLSS_CONFIG",
-          "link": 98
-        },
-        {
-          "name": "image",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        },
-        {
-          "name": "fps",
-          "shape": 7,
-          "type": "FLOAT",
-          "widget": {
-            "name": "fps"
-          },
-          "link": 92
-        }
-      ],
-      "outputs": [
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "links": [
-            82
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSStage2"
-      },
-      "widgets_values": [
-        0,
-        0,
-        24
-      ],
-      "widgets_values_named": {
-        "frames_per_chunk": 0,
-        "s2_overlap": 0,
-        "fps": 24
-      }
-    },
-    {
-      "id": 99,
-      "type": "CLSSConfig",
-      "pos": [
-        100,
-        3334
-      ],
-      "size": [
-        278.76171875,
-        130
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "clss_config",
-          "type": "CLSS_CONFIG",
-          "links": [
-            105
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSConfig"
-      },
-      "widgets_values": [
-        0.05,
-        0.4,
-        8,
-        0
-      ],
-      "widgets_values_named": {
-        "tau_c": 0.05,
-        "beta": 0.4,
-        "overlap": 8,
-        "noise_temporal_corr": 0
-      }
-    },
-    {
-      "id": 22,
-      "type": "LTXVScheduler",
-      "pos": [
-        2110.7839843750003,
-        130
-      ],
-      "size": [
-        270,
-        154
-      ],
-      "flags": {},
-      "order": 26,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "latent",
-          "shape": 7,
-          "type": "LATENT",
-          "link": 69
-        }
-      ],
-      "outputs": [
-        {
-          "name": "SIGMAS",
-          "type": "SIGMAS",
-          "links": [
-            102
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "LTXVScheduler"
-      },
-      "widgets_values": [
-        30,
-        2.05,
-        0.95,
-        true,
-        0.1
-      ],
-      "widgets_values_named": {
-        "steps": 30,
-        "max_shift": 2.05,
-        "base_shift": 0.95,
-        "stretch": true,
-        "terminal": 0.1
-      }
-    },
-    {
-      "id": 94,
-      "type": "CLSSAVGuiderV2",
-      "pos": [
-        1350.9224609375,
-        390
-      ],
-      "size": [
-        378.5533203125,
-        242
-      ],
-      "flags": {},
-      "order": 24,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 88
-        },
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 89
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 90
-        }
-      ],
-      "outputs": [
-        {
-          "name": "guider",
-          "type": "GUIDER",
-          "links": [
-            100
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSAVGuiderV2"
-      },
-      "widgets_values": [
-        4,
-        7,
-        1,
-        0.7,
-        1,
-        1,
-        28
-      ],
-      "widgets_values_named": {
-        "video_cfg": 4,
-        "audio_cfg": 7,
-        "modality_scale": 1,
-        "rescale": 0.7,
-        "video_stg": 1,
-        "audio_stg": 1,
-        "stg_block": 28
-      }
-    },
-    {
-      "id": 100,
-      "type": "CLSSStreamingSampler",
-      "pos": [
-        2480.7839843750003,
-        130
-      ],
-      "size": [
-        270.72265625,
-        366
-      ],
-      "flags": {},
-      "order": 27,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "guider",
-          "type": "GUIDER",
-          "link": 100
-        },
-        {
-          "name": "sampler",
-          "type": "SAMPLER",
-          "link": 101
-        },
-        {
-          "name": "sigmas",
-          "type": "SIGMAS",
-          "link": 102
-        },
-        {
-          "name": "noise",
-          "type": "NOISE",
-          "link": 103
-        },
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "link": 104
-        },
-        {
-          "name": "clss_config",
-          "type": "CLSS_CONFIG",
-          "link": 105
-        },
-        {
-          "name": "image",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": 106
-        },
-        {
-          "name": "fps",
-          "shape": 7,
-          "type": "FLOAT",
-          "widget": {
-            "name": "fps"
-          },
-          "link": 99
-        }
-      ],
-      "outputs": [
-        {
-          "name": "latent",
-          "type": "LATENT",
-          "links": [
-            65
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLSSStreamingSampler"
-      },
-      "widgets_values": [
-        6,
-        24,
-        "on",
-        0.5,
-        -0.5,
-        0,
-        "on",
-        "transition_chunk"
-      ],
-      "widgets_values_named": {
-        "num_chunks": 6,
-        "fps": 24,
-        "detail_anchor": "on",
-        "video_slb_tau_mult": 0.5,
-        "audio_slb_tau_mult": -0.5,
-        "audio_shift_mult": 0,
-        "auto_seam_pin": "on",
-        "scene_handoff": "transition_chunk"
-      }
+    "class_type": "VAELoaderKJ",
+    "_meta": {
+      "title": "VAELoader KJ"
     }
-  ],
-  "links": [
-    [
-      54,
-      47,
-      0,
-      6,
-      0,
-      "CLIP"
-    ],
-    [
-      55,
-      7,
-      0,
-      8,
-      0,
-      "IMAGE"
-    ],
-    [
-      56,
-      8,
-      0,
-      9,
-      0,
-      "IMAGE"
-    ],
-    [
-      57,
-      10,
-      0,
-      13,
-      1,
-      "INT"
-    ],
-    [
-      58,
-      11,
-      0,
-      13,
-      2,
-      "INT"
-    ],
-    [
-      59,
-      1,
-      0,
-      13,
-      0,
-      "VAE"
-    ],
-    [
-      60,
-      9,
-      0,
-      14,
-      0,
-      "INT"
-    ],
-    [
-      61,
-      9,
-      1,
-      14,
-      1,
-      "INT"
-    ],
-    [
-      62,
-      10,
-      0,
-      14,
-      2,
-      "INT"
-    ],
-    [
-      63,
-      14,
-      0,
-      15,
-      0,
-      "LATENT"
-    ],
-    [
-      64,
-      13,
-      0,
-      15,
-      1,
-      "LATENT"
-    ],
-    [
-      65,
-      100,
-      0,
-      19,
-      0,
-      "LATENT"
-    ],
-    [
-      66,
-      23,
-      0,
-      21,
-      0,
-      "CONDITIONING"
-    ],
-    [
-      67,
-      23,
-      1,
-      21,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      68,
-      19,
-      0,
-      21,
-      2,
-      "LATENT"
-    ],
-    [
-      69,
-      15,
-      0,
-      22,
-      0,
-      "LATENT"
-    ],
-    [
-      70,
-      12,
-      0,
-      23,
-      2,
-      "FLOAT"
-    ],
-    [
-      71,
-      58,
-      0,
-      23,
-      0,
-      "CONDITIONING"
-    ],
-    [
-      72,
-      6,
-      0,
-      23,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      73,
-      21,
-      2,
-      25,
-      0,
-      "LATENT"
-    ],
-    [
-      74,
-      26,
-      0,
-      25,
-      1,
-      "LATENT_UPSCALE_MODEL"
-    ],
-    [
-      75,
-      2,
-      0,
-      25,
-      2,
-      "VAE"
-    ],
-    [
-      76,
-      3,
-      0,
-      27,
-      0,
-      "MODEL"
-    ],
-    [
-      77,
-      25,
-      0,
-      28,
-      0,
-      "LATENT"
-    ],
-    [
-      78,
-      19,
-      1,
-      28,
-      1,
-      "LATENT"
-    ],
-    [
-      79,
-      27,
-      0,
-      31,
-      0,
-      "MODEL"
-    ],
-    [
-      80,
-      21,
-      0,
-      31,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      81,
-      21,
-      1,
-      31,
-      2,
-      "CONDITIONING"
-    ],
-    [
-      82,
-      97,
-      0,
-      34,
-      0,
-      "LATENT"
-    ],
-    [
-      83,
-      34,
-      1,
-      35,
-      0,
-      "LATENT"
-    ],
-    [
-      84,
-      1,
-      0,
-      35,
-      1,
-      "VAE"
-    ],
-    [
-      85,
-      34,
-      0,
-      37,
-      1,
-      "LATENT"
-    ],
-    [
-      86,
-      2,
-      0,
-      37,
-      0,
-      "VAE"
-    ],
-    [
-      87,
-      47,
-      0,
-      58,
-      0,
-      "CLIP"
-    ],
-    [
-      88,
-      3,
-      0,
-      94,
-      0,
-      "MODEL"
-    ],
-    [
-      89,
-      23,
-      0,
-      94,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      90,
-      23,
-      1,
-      94,
-      2,
-      "CONDITIONING"
-    ],
-    [
-      91,
-      35,
-      0,
-      95,
-      0,
-      "AUDIO"
-    ],
-    [
-      92,
-      12,
-      0,
-      97,
-      8,
-      "FLOAT"
-    ],
-    [
-      93,
-      31,
-      0,
-      97,
-      0,
-      "GUIDER"
-    ],
-    [
-      94,
-      29,
-      0,
-      97,
-      1,
-      "SAMPLER"
-    ],
-    [
-      95,
-      30,
-      0,
-      97,
-      2,
-      "SIGMAS"
-    ],
-    [
-      96,
-      32,
-      0,
-      97,
-      3,
-      "NOISE"
-    ],
-    [
-      97,
-      28,
-      0,
-      97,
-      4,
-      "LATENT"
-    ],
-    [
-      98,
-      82,
-      0,
-      97,
-      5,
-      "CLSS_CONFIG"
-    ],
-    [
-      99,
-      12,
-      0,
-      100,
-      8,
-      "FLOAT"
-    ],
-    [
-      100,
-      94,
-      0,
-      100,
-      0,
-      "GUIDER"
-    ],
-    [
-      101,
-      20,
-      0,
-      100,
-      1,
-      "SAMPLER"
-    ],
-    [
-      102,
-      22,
-      0,
-      100,
-      2,
-      "SIGMAS"
-    ],
-    [
-      103,
-      16,
-      0,
-      100,
-      3,
-      "NOISE"
-    ],
-    [
-      104,
-      15,
-      0,
-      100,
-      4,
-      "LATENT"
-    ],
-    [
-      105,
-      99,
-      0,
-      100,
-      5,
-      "CLSS_CONFIG"
-    ],
-    [
-      106,
-      2,
-      0,
-      100,
-      7,
-      "VAE"
-    ]
-  ],
-  "groups": [],
-  "config": {},
-  "extra": {
-    "ds": {
-      "scale": 0.9849732675807774,
-      "offset": [
-        -1848.1677792290354,
-        41.577848049001986
+  },
+  "2": {
+    "inputs": {
+      "vae_name": "ltx-2.3-22b-dev_video_vae.safetensors",
+      "device": "main_device",
+      "weight_dtype": "bf16"
+    },
+    "class_type": "VAELoaderKJ",
+    "_meta": {
+      "title": "VAELoader KJ"
+    }
+  },
+  "3": {
+    "inputs": {
+      "unet_name": "ltx-2.3-22b-dev-UD-Q4_K_S.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "blurry, low quality, still frame, frames, watermark, overlay, titles, has blurbox, has subtitles, no harsh electronic hiss, no heavy SFX",
+      "clip": [
+        "47",
+        0
       ]
     },
-    "frontendVersion": "1.49.6",
-    "VHS_latentpreview": false,
-    "VHS_latentpreviewrate": 0,
-    "VHS_MetadataImage": true,
-    "VHS_KeepIntermediate": true
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
   },
-  "version": 0.4
+  "7": {
+    "inputs": {
+      "width": 1280,
+      "height": 720,
+      "batch_size": 1,
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "Empty Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "scale_by": 0.5,
+      "image": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "ImageScaleBy",
+    "_meta": {
+      "title": "Upscale Image By"
+    }
+  },
+  "9": {
+    "inputs": {
+      "image": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "10": {
+    "inputs": {
+      "value": 241
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Length"
+    }
+  },
+  "11": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Frame Rate(int)"
+    }
+  },
+  "12": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Frame Rate(float)"
+    }
+  },
+  "13": {
+    "inputs": {
+      "frames_number": [
+        "10",
+        0
+      ],
+      "frame_rate": [
+        "11",
+        0
+      ],
+      "batch_size": 1,
+      "audio_vae": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": {
+      "title": "LTXV Empty Latent Audio"
+    }
+  },
+  "14": {
+    "inputs": {
+      "width": [
+        "9",
+        0
+      ],
+      "height": [
+        "9",
+        1
+      ],
+      "length": [
+        "10",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "EmptyLTXVLatentVideo"
+    }
+  },
+  "15": {
+    "inputs": {
+      "video_latent": [
+        "14",
+        0
+      ],
+      "audio_latent": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "16": {
+    "inputs": {
+      "noise_seed": 595496602479605
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "19": {
+    "inputs": {
+      "av_latent": [
+        "100",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "20": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "21": {
+    "inputs": {
+      "positive": [
+        "23",
+        0
+      ],
+      "negative": [
+        "23",
+        1
+      ],
+      "latent": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "LTXVCropGuides",
+    "_meta": {
+      "title": "LTXVCropGuides"
+    }
+  },
+  "22": {
+    "inputs": {
+      "steps": 30,
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "stretch": true,
+      "terminal": 0.1,
+      "latent": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "LTXVScheduler",
+    "_meta": {
+      "title": "LTXVScheduler"
+    }
+  },
+  "23": {
+    "inputs": {
+      "frame_rate": [
+        "12",
+        0
+      ],
+      "positive": [
+        "58",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXVConditioning"
+    }
+  },
+  "25": {
+    "inputs": {
+      "samples": [
+        "21",
+        2
+      ],
+      "upscale_model": [
+        "26",
+        0
+      ],
+      "vae": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "LTXVLatentUpsampler",
+    "_meta": {
+      "title": "spatial"
+    }
+  },
+  "26": {
+    "inputs": {
+      "model_name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    },
+    "class_type": "LatentUpscaleModelLoader",
+    "_meta": {
+      "title": "Load Latent Upscale Model"
+    }
+  },
+  "27": {
+    "inputs": {
+      "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors",
+      "strength_model": 1,
+      "model": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "28": {
+    "inputs": {
+      "video_latent": [
+        "25",
+        0
+      ],
+      "audio_latent": [
+        "19",
+        1
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "29": {
+    "inputs": {
+      "sampler_name": "euler_ancestral"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "30": {
+    "inputs": {
+      "sigmas": "0.909375, 0.725, 0.55, 0.421875, 0.25, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  },
+  "31": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "27",
+        0
+      ],
+      "positive": [
+        "21",
+        0
+      ],
+      "negative": [
+        "21",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG Guider"
+    }
+  },
+  "32": {
+    "inputs": {
+      "noise_seed": 1037028275052957
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "34": {
+    "inputs": {
+      "av_latent": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "35": {
+    "inputs": {
+      "samples": [
+        "34",
+        1
+      ],
+      "audio_vae": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "37": {
+    "inputs": {
+      "filename_prefix": "test1/frame_",
+      "frames_per_slice": 32,
+      "context_frames": 2,
+      "vae": [
+        "2",
+        0
+      ],
+      "latent": [
+        "34",
+        0
+      ]
+    },
+    "class_type": "CLSSVideoDecodeSave",
+    "_meta": {
+      "title": "CLSS Video Decode+Save (streaming)"
+    }
+  },
+  "47": {
+    "inputs": {
+      "clip_name1": "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
+      "clip_name2": "ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+      "type": "ltxv"
+    },
+    "class_type": "DualCLIPLoaderGGUF",
+    "_meta": {
+      "title": "DualCLIPLoader (GGUF)"
+    }
+  },
+  "58": {
+    "inputs": {
+      "prompts": "From the driver's first-person perspective, a classic red vintage Ferrari convertible hugs the winding Pacific Coast Highway, its glossy hood and chrome grille leading the view as the car glides through a gentle right-hand curve. The driver's tanned hands grip the black leather steering wheel at ten and two, fingers tapping rhythmically as the asphalt rushes beneath the open hood. The bright white dashboard gauges and the wind buffeting the windshield frame fill the immediate foreground, while the steering wheel slightly rotates with each turn. Through the curved glass, the deep blue Pacific Ocean sparkles intensely to the right, with whitecaps breaking against scattered rocks just offshore, while dry golden-brown hills rise steeply on the left, dotted with green coastal scrub. A fixed, eye-level POV camera is mounted just behind the steering wheel, looking straight ahead over the hood, perfectly framing the road's center line as it unfurls toward the horizon. Late afternoon golden hour light pours through the windshield, casting warm orange and yellow glare across the polished chrome and leather, with long shadows stretching from the front wheels. Audio is radio song playing classic 90' song in high quality with no artifacts and no noise. The steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead.\n---\nThe steering wheel completes its subtle rotation back to center as the road straightens out, the Ferrari's chrome hood emblem now perfectly aligned with the vanishing point, where the dramatic coastal cliffs begin to visibly recede and flatten into a low, hazy coastal plain just ahead. The driver's right hand lifts briefly from the wheel to adjust the rearview mirror, momentarily obscuring the left side of the frame with a black leather glove, before returning firmly to the ten-and-two position. The car accelerates smoothly, the tachometer needle on the white dashboard swinging upward as the engine's deep roar intensifies. Through the windshield, the ocean view gradually shrinks to the right as the highway curves slightly inland, replacing the crashing waves with the first scattered clusters of whitewashed buildings and telephone poles lining the roadside. The dry golden hills on the left now show the distinct grid patterns of suburban development creeping up their lower slopes. The golden hour light grows warmer, deepening to a rich amber that bounces off the windshield, creating a strong lens flare that partially obscures the far-left lane. Audio remains the crisp 90's rock track from the radio, now layered with the rising pitch of the Ferrari's V12 engine and the increased whoosh of wind turbulence around the windshield frame. A large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood.\n---\nA large, reflective green highway sign looms directly into the center of the windshield, its bold white lettering clearly spelling the city's name and exit number, while its metal support pole casts a sharp, elongated shadow across the asphalt directly in front of the glowing red hood. The driver's left hand firmly turns the steering wheel to the right, the leather-wrapped rim sliding through the gloved fingers as the Ferrari smoothly veers onto the off-ramp. The camera tilts slightly with the lateral G-force, now showing the concrete barriers and merging lanes of the city approach in the foreground. The ocean vanishes entirely, replaced by a dense skyline of glass-and-steel high-rises that catch the last rays of the setting sun, creating a blinding mosaic of orange and pink reflections across every window. The car decelerates, the driver's right foot easing off the gas as the tachometer drops, and the first city traffic light appears ahead, its red glow vivid against the dusky blue sky. The immediate foreground is now filled with the Ferrari's glossy hood reflecting the city's grid of streetlights, with the driver's hands steadying the wheel as the road narrows into a multi-lane urban boulevard. Audio transforms from wind noise to the muffled, echoing roar of the V12 bouncing off nearby concrete walls and storefronts, with the radio song fading slightly beneath the urban reverberation. The Ferrari rolls to a complete, purring stop at the first city intersection, the view now perfectly framed by towering glass facades on both sides, the red traffic light dangling overhead, while the driver's gloved thumb taps impatiently against the leather wheel as a crosswalk signal ticks down its glowing white numbers directly ahead.",
+      "max_length": 512,
+      "clip": [
+        "47",
+        0
+      ]
+    },
+    "class_type": "CLSSScenePrompts",
+    "_meta": {
+      "title": "CLSS Scene Prompts"
+    }
+  },
+  "82": {
+    "inputs": {
+      "tau_c": 0.05,
+      "beta": 0.4,
+      "overlap": 8,
+      "noise_temporal_corr": 0
+    },
+    "class_type": "CLSSConfig",
+    "_meta": {
+      "title": "CLSS Config"
+    }
+  },
+  "94": {
+    "inputs": {
+      "video_cfg": 4,
+      "audio_cfg": 7,
+      "modality_scale": 1,
+      "rescale": 0.7,
+      "video_stg": 1,
+      "audio_stg": 1,
+      "stg_block": 28,
+      "model": [
+        "3",
+        0
+      ],
+      "positive": [
+        "23",
+        0
+      ],
+      "negative": [
+        "23",
+        1
+      ]
+    },
+    "class_type": "CLSSAVGuiderV2",
+    "_meta": {
+      "title": "CLSS AV Guider V2 (Split CFG + Modality)"
+    }
+  },
+  "95": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "format": "flac",
+      "audio": [
+        "35",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAdvanced",
+    "_meta": {
+      "title": "Save Audio (Advanced)"
+    }
+  },
+  "97": {
+    "inputs": {
+      "frames_per_chunk": 0,
+      "s2_overlap": 0,
+      "fps": [
+        "12",
+        0
+      ],
+      "guider": [
+        "31",
+        0
+      ],
+      "sampler": [
+        "29",
+        0
+      ],
+      "sigmas": [
+        "30",
+        0
+      ],
+      "noise": [
+        "32",
+        0
+      ],
+      "latent": [
+        "28",
+        0
+      ],
+      "clss_config": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "CLSSStage2",
+    "_meta": {
+      "title": "CLSS Stage 2"
+    }
+  },
+  "99": {
+    "inputs": {
+      "tau_c": 0.05,
+      "beta": 0.4,
+      "overlap": 8,
+      "noise_temporal_corr": 0
+    },
+    "class_type": "CLSSConfig",
+    "_meta": {
+      "title": "CLSS Config"
+    }
+  },
+  "100": {
+    "inputs": {
+      "num_chunks": 6,
+      "fps": [
+        "12",
+        0
+      ],
+      "detail_anchor": "on",
+      "video_slb_tau_mult": 0.5,
+      "audio_slb_tau_mult": -0.5,
+      "audio_shift_mult": 0,
+      "auto_seam_pin": "on",
+      "scene_handoff": "transition_chunk",
+      "guider": [
+        "94",
+        0
+      ],
+      "sampler": [
+        "20",
+        0
+      ],
+      "sigmas": [
+        "22",
+        0
+      ],
+      "noise": [
+        "16",
+        0
+      ],
+      "latent": [
+        "15",
+        0
+      ],
+      "clss_config": [
+        "99",
+        0
+      ],
+      "vae": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLSSStreamingSampler",
+    "_meta": {
+      "title": "CLSS Streaming Sampler"
+    }
+  }
 }
